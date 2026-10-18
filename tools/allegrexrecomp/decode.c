@@ -554,9 +554,9 @@ int a_decode(uint32_t word, uint32_t addr, a_insn *out) {
         case 7: op = A_VFIM; break;
         default: op = A_VFPU_UNKNOWN; break;
         }
-        out->vd = (word >> 16) & 0x7F;
-        out->imm = (int32_t)(int16_t)(word & 0xFFFF);
-        out->vsize = 1;
+        in.vd = (word >> 16) & 0x7F;
+        in.imm = (int32_t)(int16_t)(word & 0xFFFF);
+        in.vsize = 1;
         break;
     case 0x19:
         switch ((word >> 23) & 7) {
