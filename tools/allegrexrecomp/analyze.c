@@ -1183,9 +1183,8 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
     return 0;
 }
 
-int a_scan_data_pointers(const a_analysis *an,
-                         const uint8_t *region, uint32_t region_len,
-                         uint32_t *out, int max) {
+static int scan_data(const a_analysis *an, const uint8_t *region, uint32_t region_len,
+                     uint32_t region_addr, uint32_t *out_v, a_data_seed *out_s, int max) {
     int found = 0;
 
     for (uint32_t off = 0; off + 4 <= region_len; off += 4) {
@@ -1199,10 +1198,161 @@ int a_scan_data_pointers(const a_analysis *an,
         a_insn in;
         if (!a_decode(fetch(an, v), v, &in) || in.op == A_INVALID) continue;
 
-        if (found < max) out[found] = v;
+        if (found < max) {
+            if (out_v) out_v[found] = v;
+            if (out_s) { out_s[found].value = v; out_s[found].source = region_addr + off; }
+        }
         found++;
     }
     return found;
+}
+
+int a_scan_data_pointers(const a_analysis *an,
+                         const uint8_t *region, uint32_t region_len,
+                         uint32_t *out, int max) {
+    return scan_data(an, region, region_len, 0, out, NULL, out ? max : 0);
+}
+
+int a_scan_data_seeds(const a_analysis *an, const uint8_t *region, uint32_t region_len,
+                      uint32_t region_addr, a_data_seed *out, int max) {
+    return scan_data(an, region, region_len, region_addr, NULL, out, out ? max : 0);
+}
+
+/* ---- pruning jump-table words from the data seeds ------------------------- */
+
+#define PRUNE_PASSES 4
+
+static int cmp_u32(const void *a, const void *b) {
+    uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+    return (x > y) - (x < y);
+}
+
+static int has_u32(const uint32_t *v, int n, uint32_t x) {
+    int lo = 0, hi = n - 1;
+    while (lo <= hi) {
+        const int mid = lo + (hi - lo) / 2;
+        if (v[mid] == x) return 1;
+        if (v[mid] < x) lo = mid + 1; else hi = mid - 1;
+    }
+    return 0;
+}
+
+static int is_func_entry(const a_analysis *an, uint32_t a) {
+    int lo = 0, hi = an->nfuncs - 1;              /* funcs are sorted by addr */
+    while (lo <= hi) {
+        const int mid = lo + (hi - lo) / 2;
+        if (an->funcs[mid].addr == a) return 1;
+        if (an->funcs[mid].addr < a) lo = mid + 1; else hi = mid - 1;
+    }
+    return 0;
+}
+
+/* Is the data word at `src` one of a recovered table's reachable entries?
+ * (Tables are sorted by site, not by address, so all are searched.) */
+static int in_table(const a_analysis *an, uint32_t src) {
+    for (int i = 0; i < an->njtables; i++) {
+        const a_jtable *t = &an->jtables[i];
+        if (src >= t->table && src - t->table < 4u * t->count) return 1;
+    }
+    return 0;
+}
+
+static int cmp_u64(const void *a, const void *b) {
+    uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+    return (x > y) - (x < y);
+}
+
+/* Every (target, owner of the jr) pair of the recovered tables, sorted. */
+static uint64_t *local_cases(const a_analysis *an, int *n) {
+    uint64_t *v = (uint64_t *)malloc(((size_t)an->njt_targets + 1) * sizeof *v);
+    *n = 0;
+    if (!v) return NULL;
+    for (int i = 0; i < an->njtables; i++) {
+        const a_jtable *t = &an->jtables[i];
+        const uint32_t own = an->owner[(t->site - an->base) >> 2];
+        for (uint32_t k = 0; k < t->count; k++)
+            v[(*n)++] = (uint64_t)an->jt_targets[t->first + k] << 32 | own;
+    }
+    qsort(v, (size_t)*n, sizeof *v, cmp_u64);
+    return v;
+}
+
+/* Is the code at `v` still reached as something a switch can get to: a
+ * function entry, or a block of the function that owns a table listing it? */
+static int case_reached(const a_analysis *an, const uint64_t *lc, int nlc, uint32_t v) {
+    if (is_func_entry(an, v)) return 1;
+    if (!a_in_range(an, v)) return 0;
+    const uint32_t own = an->owner[(v - an->base) >> 2];
+    if (own == A_NO_OWNER) return 0;
+    const uint64_t key = (uint64_t)v << 32 | own;
+    int lo = 0, hi = nlc - 1;
+    while (lo <= hi) {
+        const int mid = lo + (hi - lo) / 2;
+        if (lc[mid] == key) return 1;
+        if (lc[mid] < key) lo = mid + 1; else hi = mid - 1;
+    }
+    return 0;
+}
+
+int a_discover_pruned(a_analysis *an, const uint32_t *seeds, int nseeds,
+                      const a_data_seed *ds, int nds, a_prune_stats *ps) {
+    memset(ps, 0, sizeof *ps);
+    const a_analysis in = *an;                  /* the inputs, for every run */
+    uint32_t *other = (uint32_t *)malloc(((size_t)nseeds + 1) * sizeof *other);
+    uint32_t *all = (uint32_t *)malloc(((size_t)nseeds + (size_t)nds + 1) * sizeof *all);
+    uint8_t *drop = (uint8_t *)calloc((size_t)nds + 1, 1);
+    uint8_t *keep = (uint8_t *)calloc((size_t)nds + 1, 1);   /* never drop again */
+    int rc = -1;
+    if (!other || !all || !drop || !keep) goto out;
+    if (nseeds) memcpy(other, seeds, (size_t)nseeds * sizeof *other);
+    qsort(other, (size_t)nseeds, sizeof *other, cmp_u32);
+
+    /* By value: the scan finds the same address in several words, and a
+     * value is dropped only if every word holding it is a table entry. */
+    uint32_t *vals = (uint32_t *)malloc(((size_t)nds + 1) * sizeof *vals);
+    if (!vals) goto out;
+    for (;;) {
+        int n = 0;
+        for (int i = 0; i < nseeds; i++) all[n++] = seeds[i];
+        for (int i = 0; i < nds; i++) if (!drop[i]) all[n++] = ds[i].value;
+        if (ps->passes) a_analysis_free(an);
+        *an = in;
+        if (a_discover(an, all, n) != 0) { free(vals); goto out; }
+        ps->passes++;
+
+        /* Put back every dropped value whose code this run lost. */
+        int restored = 0, nlc = 0;
+        uint64_t *lc = local_cases(an, &nlc);
+        if (!lc) { free(vals); goto out; }
+        for (int i = 0; i < nds; i++) {
+            if (!drop[i] || case_reached(an, lc, nlc, ds[i].value)) continue;
+            for (int j = 0; j < nds; j++)
+                if (ds[j].value == ds[i].value && drop[j]) {
+                    drop[j] = 0; keep[j] = 1; restored++;
+                }
+        }
+        free(lc);
+        ps->restored += restored;
+
+        /* Values this run's tables justify dropping. */
+        int added = 0;
+        if (ps->passes < PRUNE_PASSES) {
+            int nv = 0;
+            for (int i = 0; i < nds; i++)
+                if (keep[i] || has_u32(other, nseeds, ds[i].value) || !in_table(an, ds[i].source))
+                    vals[nv++] = ds[i].value;            /* held somewhere it must stay */
+            qsort(vals, (size_t)nv, sizeof *vals, cmp_u32);
+            for (int i = 0; i < nds; i++)
+                if (!drop[i] && !has_u32(vals, nv, ds[i].value)) { drop[i] = 1; added++; }
+        }
+        if (!restored && !added) break;
+    }
+    free(vals);
+    for (int i = 0; i < nds; i++) ps->dropped += drop[i];
+    rc = 0;
+out:
+    free(other); free(all); free(drop); free(keep);
+    return rc;
 }
 
 /* How far a low half may follow its lui. Compilers schedule the pair close

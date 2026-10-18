@@ -481,6 +481,7 @@ typedef struct {
     int npair;       /* distinct targets of lui/addiu and lui/ori pairs in code */
     int nfile;       /* taken from the --seeds file */
     int nfile_ignored; /* in the --seeds file but not in an executable section */
+    a_prune_stats prune; /* scanned data pointers dropped as jump-table words */
 } seed_stats;
 
 /* Load a decrypted module and run discovery over it. On success the caller
@@ -573,6 +574,11 @@ static int load_and_discover(const char *path, const char *seeds_path, psp_blob 
      * nothing to enumerate. Fall back to recognising pointers by shape, which
      * is a heuristic rather than a fact and is only used when enumeration
      * genuinely had nothing to offer. */
+    /* Kept apart from the other seeds, with where each was read, so
+     * discovery can drop the ones that turn out to be jump-table words (see
+     * a_discover_pruned). */
+    a_data_seed *dseeds = NULL;
+    int ndseeds = 0;
     if (nptr == 0 && e->nsegments) {
         const elf_segment *s = &e->seg[0];
         uint32_t data_off = e->text_offset + e->text_size;
@@ -580,25 +586,21 @@ static int load_and_discover(const char *path, const char *seeds_path, psp_blob 
 
         if (data_off < seg_end && (size_t)seg_end <= b->size) {
             uint32_t region_len = seg_end - data_off;
-            int avail = a_scan_data_pointers(an, b->data + data_off, region_len, NULL, 0);
+            const uint32_t region_addr = s->addr + (data_off - s->offset);
+            int avail = a_scan_data_seeds(an, b->data + data_off, region_len, region_addr, NULL, 0);
 
-            uint32_t *bigger = (uint32_t *)realloc(seeds, (size_t)(nseeds + avail) * sizeof *seeds);
-            if (bigger) {
-                seeds = bigger;
-                nptr = a_scan_data_pointers(an, b->data + data_off, region_len,
-                                            seeds + nseeds, avail);
-                if (nptr > avail) nptr = avail;
+            dseeds = (a_data_seed *)malloc(((size_t)avail + 1) * sizeof *dseeds);
+            if (dseeds) {
+                int n = a_scan_data_seeds(an, b->data + data_off, region_len, region_addr,
+                                          dseeds, avail);
+                if (n > avail) n = avail;
                 /* A heuristic pointer is only trusted as a *code* seed if it
                  * lands in an executable section. Pointers into .rodata/.data
                  * are strings, tables and other read-only data, and seeding
                  * them produced thousands of "functions" made of data. */
-                int kept = 0;
-                for (int i = 0; i < nptr; i++) {
-                    uint32_t p = seeds[nseeds + i];
-                    if (seed_in_code(e, p)) seeds[nseeds + kept++] = p;
-                }
-                nptr = kept;
-                nseeds += nptr;
+                for (int i = 0; i < n; i++)
+                    if (seed_in_code(e, dseeds[i].value)) dseeds[ndseeds++] = dseeds[i];
+                nptr = ndseeds;
                 st->scanned = 1;
             }
         }
@@ -612,7 +614,7 @@ static int load_and_discover(const char *path, const char *seeds_path, psp_blob 
         if (!bigger) {
             fprintf(stderr, "discovery failed (out of memory)\n");
             free(fs);
-            free(seeds);
+            free(seeds); free(dseeds);
             psp_blob_free(b);
             return -1;
         }
@@ -644,7 +646,7 @@ static int load_and_discover(const char *path, const char *seeds_path, psp_blob 
         if (!bigger) {
             fprintf(stderr, "discovery failed (out of memory)\n");
             free(fs);
-            free(seeds);
+            free(seeds); free(dseeds);
             psp_blob_free(b);
             return -1;
         }
@@ -665,8 +667,11 @@ static int load_and_discover(const char *path, const char *seeds_path, psp_blob 
         fs = NULL;
     }
 
-    int rc = a_discover(an, seeds, nseeds);
+    int rc = ndseeds ? a_discover_pruned(an, seeds, nseeds, dseeds, ndseeds, &st->prune)
+                     : a_discover(an, seeds, nseeds);
     free(seeds);
+    free(dseeds);
+    nseeds += ndseeds;
     if (rc != 0) {
         fprintf(stderr, "discovery failed (out of memory)\n");
         psp_blob_free(b);
@@ -696,6 +701,10 @@ static int cmd_funcs(const char *path, int list, const char *seeds_path) {
            st.scanned ? "scanned data pointers (heuristic)" : "relocation pointers",
            st.npair, st.nfile);
     if (st.nfile_ignored) printf("seeds file: %d ignored\n", st.nfile_ignored);
+    if (st.scanned)
+        printf("pruned:     dropped %d jump-table words from the data-pointer seeds "
+               "(%d restored, %d discovery passes)\n",
+               st.prune.dropped, st.prune.restored, st.prune.passes);
     printf("\n");
     printf("functions:  %d\n", an.nfuncs);
     /* `an.size` is the whole loaded image -- code plus .data plus .bss -- so

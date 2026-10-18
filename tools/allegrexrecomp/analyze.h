@@ -173,6 +173,39 @@ int a_scan_data_pointers(const a_analysis *an,
                          const uint8_t *region, uint32_t region_len,
                          uint32_t *out, int max);
 
+/* A pointer found by the data scan, and where it was read: the address of
+ * the data word. */
+typedef struct { uint32_t value, source; } a_data_seed;
+
+/* a_scan_data_pointers, also reporting each pointer's source address.
+ * `region_addr` is the virtual address of region[0]. Returns the number
+ * found (may exceed `max`). */
+int a_scan_data_seeds(const a_analysis *an, const uint8_t *region, uint32_t region_len,
+                      uint32_t region_addr, a_data_seed *out, int max);
+
+typedef struct {
+    int dropped;    /* data seeds (words) left out of the final discovery */
+    int restored;   /* dropped once, put back because their code was lost */
+    int passes;     /* discovery runs */
+} a_prune_stats;
+
+/* Discovery with the data-scan seeds `ds` added to `seeds`, minus the ones
+ * that are only jump-table words.
+ *
+ * The data scan cannot tell a function pointer from a switch table's entry:
+ * both are code addresses in .rodata/.data. Seeding table entries makes
+ * every case block a function of its own. So discovery runs once with all
+ * seeds; then every data seed whose value was read only from the reachable
+ * entries of recovered tables -- no data word outside a table holds it, and
+ * it is not in `seeds` -- is dropped, and discovery runs again. A case that
+ * is also a call, tail call or cross-function branch target still becomes
+ * an entry through the walk. A dropped seed whose code the new run does not
+ * reach as an entry or as a block of a function with a table listing it is
+ * put back for good, and discovery runs again; new tables found by a run
+ * can justify further drops, for a few passes. `an` holds the last run. */
+int a_discover_pruned(a_analysis *an, const uint32_t *seeds, int nseeds,
+                      const a_data_seed *ds, int nds, a_prune_stats *ps);
+
 /* Scan the code (the scan range, normally .text) for addresses built in
  * registers: `lui rX, hi` followed within a few instructions by
  * `addiu rY, rX, lo` or `ori rY, rX, lo`, with rX not rewritten in between.
