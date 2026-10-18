@@ -56,13 +56,48 @@ int main(void) {
 
     elf_info e;
     CHECK(elf_parse(buf, sizeof buf, &e) == 0, "parse");
-    CHECK(e.nexec == 3, "three executable sections (stub and rodata excluded)");
-    if (e.nexec == 3) {
-        CHECK(e.exec_lo[0] == 0x08804018 && e.exec_hi[0] == 0x08804040, ".init range");
-        CHECK(e.exec_lo[1] == 0x08804040 && e.exec_hi[1] == 0x08804060, ".text range");
-        CHECK(e.exec_lo[2] == 0x08B2FE34 && e.exec_hi[2] == 0x08B2FE3C, ".fini range");
+    /* .init and .text touch, so they merge; .fini stays separate. */
+    CHECK(e.nexec == 2, "two ranges (stub and rodata excluded, init+text merged)");
+    if (e.nexec == 2) {
+        CHECK(e.exec_lo[0] == 0x08804018 && e.exec_hi[0] == 0x08804060, ".init+.text range");
+        CHECK(e.exec_lo[1] == 0x08B2FE34 && e.exec_hi[1] == 0x08B2FE3C, ".fini range");
     }
     CHECK(e.stub_size == 0x10, "stub section still recorded separately");
+
+    /* Adjacent executable sections merge into one range. */
+    {
+        uint8_t b2[2048];
+        memset(b2, 0, sizeof b2);
+        memcpy(b2, "\x7f" "ELF", 4);
+        b2[4] = 1; b2[5] = 1;
+        put16(b2 + 16, 2);
+        put32(b2 + 32, 0x200);
+        put16(b2 + 42, 32);
+        put16(b2 + 46, 40);
+        memcpy(b2 + 0x180, "\0.x\0.shstrtab", 15);
+        uint8_t *t = b2 + 0x200;
+        shdr(t + 40 * 1, 1, 1, 0x6, 0x08804000, 0x100, 0x40);
+        shdr(t + 40 * 2, 1, 1, 0x6, 0x08804040, 0x140, 0x20);
+        shdr(t + 40 * 3, 4, 3, 0x0, 0, 0x180, 15);
+        put16(b2 + 48, 4);
+        put16(b2 + 50, 3);
+        elf_info m;
+        CHECK(elf_parse(b2, sizeof b2, &m) == 0, "parse adjacent");
+        CHECK(m.nexec == 1 && m.exec_overflow == 0, "adjacent sections merge");
+        if (m.nexec == 1)
+            CHECK(m.exec_lo[0] == 0x08804000 && m.exec_hi[0] == 0x08804060, "merged range");
+
+        /* 17 non-adjacent executable sections overflow the table. */
+        memset(b2 + 0x200, 0, 40 * 20);
+        for (int i = 1; i <= 17; i++)
+            shdr(t + 40 * i, 1, 1, 0x6, 0x08800000 + i * 0x1000, 0x100, 0x10);
+        shdr(t + 40 * 18, 4, 3, 0x0, 0, 0x180, 15);
+        put16(b2 + 48, 19);
+        put16(b2 + 50, 18);
+        CHECK(elf_parse(b2, sizeof b2, &m) == 0, "parse overflow");
+        CHECK(m.exec_overflow == 1, "overflow flagged");
+        CHECK(m.nexec == 0, "overflow leaves no partial list");
+    }
 
     if (failures) { printf("%d check(s) failed\n", failures); return 1; }
     printf("all elf_exec checks passed\n");

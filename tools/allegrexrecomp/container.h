@@ -150,6 +150,9 @@ typedef struct {
      * Filled when section headers survive; nexec == 0 means "unknown, fall
      * back to text_addr/text_size". */
     int      nexec;
+    /* Set when there were more disjoint executable ranges than fit. nexec is
+     * then forced to 0 rather than keeping a partial (misleading) list. */
+    int      exec_overflow;
     uint32_t exec_lo[16], exec_hi[16];
 
     int      nsections;

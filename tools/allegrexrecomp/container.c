@@ -332,12 +332,31 @@ int elf_parse(const uint8_t *d, size_t len, elf_info *out) {
          * strcmp run past it; cap the comparison length instead. */
         size_t avail = strsz - nameoff;
 
-        /* Every executable PROGBITS section except the import stubs. */
-        if (sh_type == 1 && (sh_flags & 0x4) && size && out->nexec < 16 &&
+        /* Every executable PROGBITS section except the import stubs. Ranges
+         * that overlap or touch are merged; if the disjoint ones still do not
+         * fit, drop the list entirely rather than keep a partial one. */
+        if (sh_type == 1 && (sh_flags & 0x4) && size && addr + size > addr &&
+            !out->exec_overflow &&
             !(avail > 13 && strncmp(name, ".sceStub.text", 13) == 0)) {
-            out->exec_lo[out->nexec] = addr;
-            out->exec_hi[out->nexec] = addr + size;
-            out->nexec++;
+            uint32_t hi = addr + size;
+            int merged = 0;
+            for (int k = 0; k < out->nexec; k++) {
+                if (addr <= out->exec_hi[k] && hi >= out->exec_lo[k]) {
+                    if (addr < out->exec_lo[k]) out->exec_lo[k] = addr;
+                    if (hi > out->exec_hi[k]) out->exec_hi[k] = hi;
+                    merged = 1;
+                    break;
+                }
+            }
+            if (!merged) {
+                if (out->nexec < 16) {
+                    out->exec_lo[out->nexec] = addr;
+                    out->exec_hi[out->nexec] = hi;
+                    out->nexec++;
+                } else {
+                    out->exec_overflow = 1;
+                }
+            }
         }
 
         if (avail > 5 && strncmp(name, ".text", 6) == 0) {
@@ -376,6 +395,7 @@ int elf_parse(const uint8_t *d, size_t len, elf_info *out) {
             out->modinfo_size = size;
         }
     }
+    if (out->exec_overflow) out->nexec = 0;
     return 0;
 }
 
