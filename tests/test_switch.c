@@ -482,21 +482,96 @@ static void setup(a_analysis *an, uint32_t text_size) {
     an->image_size = sizeof g_code;
 }
 
-/* Emit the discovered code and return the function source. */
-static const char *emit_source(const a_analysis *an) {
+/* Emit the discovered code and return the function source. The files stay
+ * on disk: ctest compiles each of them (-fsyntax-only) afterwards, which
+ * catches undefined labels and duplicate case values. */
+static const char *emit_source(const a_analysis *an, const char *prefix) {
     static char src[1 << 16];
+    char path[64];
     emit_opts o;
     memset(&o, 0, sizeof o);
     o.outdir = ".";
-    o.prefix = "t_switch";
+    o.prefix = prefix;
     o.module = "synthetic";
     src[0] = '\0';
     CHECK(a_emit(an, &o) == 0, "emit");
-    FILE *f = fopen("./t_switch_funcs.c", "rb");
+    snprintf(path, sizeof path, "./%s_funcs.c", prefix);
+    FILE *f = fopen(path, "rb");
     size_t len = f ? fread(src, 1, sizeof src - 1, f) : 0;
     src[len] = '\0';
     if (f) fclose(f);
     return src;
+}
+
+/* The SNC idiom with the probe layout: sltiu bound, table at TABLE with
+ * entries e0..e2, a one-instruction slot at 0x1C (`ori $v0, 0, 1` when
+ * `slot`), blocks at 0x0C (inside the idiom), 0x20 and 0x28. */
+static void build_probe(uint32_t e0, uint32_t e1, uint32_t e2, int slot) {
+    uint32_t *w = g_w;
+    memset(g_w, 0, sizeof g_w);
+    w[0x00 / 4] = sltiu(A2, A0, 3);
+    w[0x04 / 4] = beq(A2, 0, BASE + 4, BASE + 0x40);
+    w[0x08 / 4] = sll(A0, A0, 2);
+    w[0x0C / 4] = lui(AT, (TABLE + 0x8000u) >> 16);
+    w[0x10 / 4] = addu(AT, AT, A0);
+    w[0x14 / 4] = lw(AT, (int)(int16_t)(TABLE & 0xFFFF), AT);
+    w[0x18 / 4] = jr(AT);
+    w[0x1C / 4] = slot ? ori(V0, 0, 1) : 0;
+    w[0x20 / 4] = JR_RA; w[0x24 / 4] = 0;
+    w[0x28 / 4] = ori(V0, 0, 3); w[0x2C / 4] = JR_RA; w[0x30 / 4] = 0;
+    w[0x40 / 4] = JR_RA; w[0x44 / 4] = 0;
+    w[0x100 / 4] = e0; w[0x104 / 4] = e1; w[0x108 / 4] = e2;
+    store();
+}
+
+
+/* Cases before the switch, one on the function's own entry:
+ *   0x00 beq a1 -> 0x30; 0x08 jr ra; 0x10 case 0; 0x1C case 1; 0x30 bound
+ *   and idiom, jr at 0x48; 0x50 case 2; 0x60 default. Table: 0x10, 0x1C,
+ *   0x50, BASE. */
+static void build_back(void) {
+    uint32_t *w = g_w;
+    memset(g_w, 0, sizeof g_w);
+    w[0x00 / 4] = beq(A1, 0, BASE, BASE + 0x30);
+    w[0x08 / 4] = JR_RA;
+    w[0x10 / 4] = ori(V0, 0, 1); w[0x14 / 4] = JR_RA;
+    w[0x1C / 4] = ori(V0, 0, 2); w[0x20 / 4] = JR_RA;
+    w[0x30 / 4] = sltiu(A2, A0, 4);
+    w[0x34 / 4] = beq(A2, 0, BASE + 0x34, BASE + 0x60);
+    w[0x38 / 4] = sll(A0, A0, 2);
+    w[0x3C / 4] = lui(AT, (TABLE + 0x8000u) >> 16);
+    w[0x40 / 4] = addu(AT, AT, A0);
+    w[0x44 / 4] = lw(AT, (int)(int16_t)(TABLE & 0xFFFF), AT);
+    w[0x48 / 4] = jr(AT);
+    w[0x50 / 4] = JR_RA; w[0x54 / 4] = ori(V0, 0, 3);
+    w[0x60 / 4] = JR_RA; w[0x64 / 4] = ori(V0, 0, 0);
+    w[0x100 / 4] = BASE + 0x10; w[0x104 / 4] = BASE + 0x1C;
+    w[0x108 / 4] = BASE + 0x50; w[0x10C / 4] = BASE;
+    store();
+}
+
+/* `transfer` at BASE, its delay slot at BASE + 4 is also the entry of a
+ * second function. The first function's body must still run the slot. */
+static void check_foreign_slot(const char *name, uint32_t transfer) {
+    a_analysis an;
+    memset(g_w, 0, sizeof g_w);
+    g_w[0x00 / 4] = transfer;
+    g_w[0x04 / 4] = ori(V0, 0, 5);              /* the slot, and an entry */
+    g_w[0x08 / 4] = JR_RA; g_w[0x0C / 4] = 0;
+    g_w[0x10 / 4] = JR_RA; g_w[0x14 / 4] = ori(V0, 0, 7);
+    store();
+    uint32_t seeds[2] = { BASE, BASE + 4 };
+    setup(&an, 0x18);
+    CHECK(a_discover(&an, seeds, 2) == 0, "%s: discover", name);
+    CHECK(an.nfuncs >= 2 && an.owner[1] != BASE, "%s: slot owned by another function", name);
+    char prefix[32];
+    snprintf(prefix, sizeof prefix, "t_switch_slot_%c%c", name[0], name[strlen(name) - 1]);
+    const char *src = emit_source(&an, prefix);
+    const char *body = strstr(src, "static void psp_body_08804000");
+    const char *end = body ? strstr(body, "static void psp_body_08804004") : NULL;
+    const char *slot = body ? strstr(body, "/* 08804004") : NULL;
+    CHECK(slot != NULL && (end == NULL || slot < end), "%s: slot runs inline in the first body", name);
+    a_analysis_free(&an);
 }
 
 int main(void) {
@@ -533,9 +608,11 @@ int main(void) {
     {
         uint32_t s1 = BASE;
         build(BASE + 0x3C);
+        g_w[0x1C / 4] = addiu(AT, AT, 4);       /* the slot clobbers the switch register */
+        store();
         setup(&an, 0x44);
         CHECK(a_discover(&an, &s1, 1) == 0, "discover for emit");
-        const char *src = emit_source(&an);
+        const char *src = emit_source(&an, "t_switch");
         CHECK(strstr(src, "{ uint32_t _sw = r_at;") != NULL, "target read before the delay slot");
         CHECK(strstr(src, "switch (_sw) {") != NULL, "switch on the loaded target");
         CHECK(strstr(src, "case 0x08804020u: goto L_08804020;") != NULL, "case 0");
@@ -543,6 +620,11 @@ int main(void) {
         CHECK(strstr(src, "case 0x0880403Cu: goto L_0880403C;") != NULL, "case 2");
         CHECK(strstr(src, "default: psp_dispatch(_sw); return;") != NULL, "default dispatches");
         CHECK(strstr(src, "psp_dispatch(r_at);") == NULL, "no bare computed dispatch left");
+        const char *cap = strstr(src, "uint32_t _sw = r_at;");
+        const char *clob = strstr(src, "r_at = r_at + 4");
+        const char *sw = strstr(src, "switch (_sw) {");
+        CHECK(cap && clob && sw && cap < clob && clob < sw,
+              "the slot runs after the capture and before the switch");
         CHECK(strstr(src, "L_0880403C: PSP_MARK") != NULL, "case 2 label emitted");
         a_analysis_free(&an);
     }
@@ -557,7 +639,7 @@ int main(void) {
         store();
         setup(&an, 0x44);
         CHECK(a_discover(&an, s2, 2) == 0, "discover for emit (entry target)");
-        const char *src = emit_source(&an);
+        const char *src = emit_source(&an, "t_switch_entry");
         const char *c2 = strstr(src, "case 0x0880403Cu:\n");
         CHECK(c2 != NULL, "entry case emitted as a call");
         CHECK(c2 && strstr(c2, "psp_func_0880403C(); PSP_SP_CALL(0x0880403Cu") != NULL &&
@@ -573,6 +655,57 @@ int main(void) {
         CHECK(first && strstr(first + 1, "case 0x08804020u") == NULL, "duplicate target: one case");
         a_analysis_free(&an);
     }
+
+    /* Cases that jump back: to blocks before the switch and to the
+     * function's own entry. All gotos (no recursive call), and a backward
+     * goto counts as a loop iteration. */
+    {
+        uint32_t s3 = BASE;
+        build_back();
+        setup(&an, 0x68);
+        CHECK(a_discover(&an, &s3, 1) == 0, "discover (backward)");
+        const a_jtable *jt = a_find_jtable(&an, BASE + 0x48);
+        CHECK(jt != NULL && jt->count == 4, "backward table kept");
+        CHECK(an.nfuncs == 1, "backward blocks stay in the function, got %d", an.nfuncs);
+        const char *src = emit_source(&an, "t_switch_back");
+        CHECK(strstr(src, "case 0x08804000u: PSP_LOOP(0x08804000u); goto L_08804000;") != NULL,
+              "case on the function's own entry is a looping goto");
+        CHECK(strstr(src, "case 0x08804010u: PSP_LOOP(0x08804010u); goto L_08804010;") != NULL,
+              "backward case 0 is a looping goto");
+        CHECK(strstr(src, "case 0x0880401Cu: PSP_LOOP(0x0880401Cu); goto L_0880401C;") != NULL,
+              "backward case 1 is a looping goto");
+        CHECK(strstr(src, "case 0x08804050u: goto L_08804050;") != NULL, "forward case has no PSP_LOOP");
+        CHECK(strstr(src, "psp_func_08804000();") == NULL, "no recursive call");
+        a_analysis_free(&an);
+    }
+
+    /* A case that is the jr's own delay slot: discovery makes it an entry,
+     * so the case is a tail call, but the slot still runs inline with the
+     * jr, before the switch. */
+    {
+        uint32_t s4 = BASE;
+        build_probe(BASE + 0x0C, BASE + 0x1C, BASE + 0x28, 1);
+        setup(&an, 0x48);
+        CHECK(a_discover(&an, &s4, 1) == 0, "discover (slot target)");
+        CHECK(an.njtables == 1, "slot-target table kept, got %d", an.njtables);
+        const char *src = emit_source(&an, "t_switch_slot");
+        const char *body = strstr(src, "static void psp_body_0880400C");
+        const char *sw = body ? strstr(body, "uint32_t _sw") : NULL;
+        const char *inl = sw ? strstr(sw, "/* 0880401C") : NULL;
+        const char *swi = sw ? strstr(sw, "switch (_sw) {") : NULL;
+        CHECK(inl && swi && inl < swi, "slot runs inline before the switch");
+        CHECK(strstr(src, "psp_func_0880401C(); PSP_SP_CALL") != NULL, "slot case is a call to its entry");
+        a_analysis_free(&an);
+    }
+
+    /* A delay slot that is another function's entry still runs with its
+     * transfer, whatever the kind. */
+    check_foreign_slot("branch", beq(A0, 0, BASE, BASE + 0x10));
+    check_foreign_slot("likely branch", beql(A0, 0, BASE, BASE + 0x10));
+    check_foreign_slot("jal", jal(BASE + 0x10));
+    check_foreign_slot("j", j_(BASE + 0x10));
+    check_foreign_slot("jr $ra", JR_RA);
+    check_foreign_slot("jr", jr(A0));
 
     /* An entry inside the bound that is not code in .text rejects the whole
      * table: the jr stays a computed jump. */

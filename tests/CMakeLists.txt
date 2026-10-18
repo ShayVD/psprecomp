@@ -71,3 +71,15 @@ add_test(NAME seeds COMMAND test_seeds)
 add_executable(test_switch test_switch.c)
 target_link_libraries(test_switch PRIVATE allegrex_core)
 add_test(NAME switch COMMAND test_switch)
+
+# The switch test leaves the C it generated next to itself; compile it, so an
+# undefined label or a duplicate case value fails here and not in a game build.
+set_tests_properties(switch PROPERTIES FIXTURES_SETUP switch_gen)
+foreach(_g IN ITEMS t_switch t_switch_entry t_switch_back t_switch_slot
+                    t_switch_slot_bh t_switch_slot_lh t_switch_slot_jl
+                    t_switch_slot_jj t_switch_slot_ja t_switch_slot_jr)
+    add_test(NAME switch_cc_${_g}
+             COMMAND ${CMAKE_C_COMPILER} -std=c11 -fsyntax-only
+                     -I${CMAKE_SOURCE_DIR}/include ${_g}_funcs.c)
+    set_tests_properties(switch_cc_${_g} PROPERTIES FIXTURES_REQUIRED switch_gen)
+endforeach()

@@ -87,6 +87,12 @@ static int is_function(const a_analysis *an, uint32_t addr) {
     return 0;
 }
 
+/* Is `t` a block inside the function that `goto` can reach? Its own entry
+ * counts (L_<owner> is always emitted); any other function entry is a call. */
+static int is_local_block(const a_analysis *an, uint32_t t, uint32_t owner) {
+    return owned_by(an, t, owner) && (!is_function(an, t) || t == owner);
+}
+
 /* Emit the address + disassembly comment that precedes every statement. */
 static void comment(ectx *c, const a_insn *in) {
     char text[128];
@@ -556,7 +562,7 @@ static void emit_function(ectx *c, const a_func *fn) {
             const a_jtable *jt = a_find_jtable(an, a);
             for (uint32_t k = 0; jt && k < jt->count; k++) {
                 const uint32_t t = an->jt_targets[jt->first + k];
-                if (owned_by(an, t, owner) && !is_function(an, t))
+                if (is_local_block(an, t, owner))
                     c->is_label[widx(an, t)] = 1;
             }
         }
@@ -684,10 +690,14 @@ static void emit_function(ectx *c, const a_func *fn) {
         /* The delay-slot instruction, if this transfers control. */
         a_insn slot;
         int have_slot = 0;
-        if (in.has_delay_slot && owned_by(an, a + 4, owner)) {
+        /* The slot runs with its branch whoever owns it: ownership only
+         * decides whether this body also has a standalone copy of it. */
+        if (in.has_delay_slot && a_in_range(an, a + 4)) {
             a_decode(fetch(an, a + 4), a + 4, &slot);
             have_slot = 1;
         }
+        const int slot_alias = have_slot && owned_by(an, a + 4, owner) &&
+                               c->is_label[widx(an, a + 4)];
 
         if (in.is_branch) {
             char cond[128];
@@ -732,7 +742,7 @@ static void emit_function(ectx *c, const a_func *fn) {
                     fprintf(f, " return; } }\n");
                 }
             }
-            if (have_slot && c->is_label[widx(an, a + 4)]) emit_slot_alias(c, a, &slot, 1);
+            if (slot_alias) emit_slot_alias(c, a, &slot, 1);
             a += 4;                              /* consumed the delay slot */
             continue;
         }
@@ -756,7 +766,7 @@ static void emit_function(ectx *c, const a_func *fn) {
             fprintf(f, "    %s = 0x%08Xu;\n", RN[31], a + 8);
             if (in.is_indirect) fprintf(f, "    psp_dispatch(%s);\n", RN[in.rs]);
             else                emit_static_call(c, in.target);
-            if (have_slot && c->is_label[widx(an, a + 4)]) emit_slot_alias(c, a, &slot, 1);
+            if (slot_alias) emit_slot_alias(c, a, &slot, 1);
             a += 4;
             continue;
         }
@@ -770,7 +780,7 @@ static void emit_function(ectx *c, const a_func *fn) {
              * as a leak. */
             fprintf(f, "    PSP_SP_CHECK(0x%08Xu);\n", a);
             fprintf(f, "    return;\n");
-            if (have_slot && c->is_label[widx(an, a + 4)]) emit_slot_alias(c, a, &slot, 0);
+            if (slot_alias) { emit_slot_alias(c, a, &slot, 0); last_terminal = 0; }
             a += 4;
             continue;
         }
@@ -782,8 +792,9 @@ static void emit_function(ectx *c, const a_func *fn) {
                  * the delay slot runs, so capture it first. The switch is on
                  * the address the jr jumps to, not on the index, so the
                  * table's lowest index (jt->lo) does not matter here. A
-                 * target the function owns is a goto; a target that is
-                 * another function's entry is a tail call, as for `j`. */
+                 * target the function owns (its own entry included) is a
+                 * goto; a target that is another function's entry is a tail
+                 * call, as for `j`. */
                 fprintf(f, "    { uint32_t _sw = %s;\n", RN[in.rs]);
                 if (have_slot) { comment(c, &slot); emit_simple(c, &slot, "      "); }
                 fprintf(f, "      switch (_sw) {\n");
@@ -793,12 +804,17 @@ static void emit_function(ectx *c, const a_func *fn) {
                     for (uint32_t j = 0; j < k && !dup; j++)
                         dup = an->jt_targets[jt->first + j] == t;
                     if (dup) continue;               /* case values must be distinct */
-                    if (owned_by(an, t, owner) && !is_function(an, t)) {
-                        fprintf(f, "      case 0x%08Xu: goto L_%08X;\n", t, t);
-                    } else {
+                    if (is_local_block(an, t, owner)) {
+                        if (t <= a) fprintf(f, "      case 0x%08Xu: PSP_LOOP(0x%08Xu); goto L_%08X;\n", t, t, t);
+                        else        fprintf(f, "      case 0x%08Xu: goto L_%08X;\n", t, t);
+                    } else if (is_function(an, t) || is_import(an, t)) {
                         fprintf(f, "      case 0x%08Xu:\n", t);
                         emit_static_call_at(c, t, "        ");
                         fprintf(f, "        return;\n");
+                    } else {
+                        /* Not an entry, so not even dispatch can reach it. */
+                        fprintf(f, "      case 0x%08Xu:\n        psp_unimplemented(0x%08Xu, "
+                                   "\"switch target not an entry\");\n        return;\n", t, a);
                     }
                 }
                 fprintf(f, "      default: psp_dispatch(_sw); return;\n      }\n    }\n");
@@ -806,7 +822,7 @@ static void emit_function(ectx *c, const a_func *fn) {
                 if (have_slot) { comment(c, &slot); emit_simple(c, &slot, "    "); }
                 fprintf(f, "    psp_dispatch(%s);\n    return;\n", RN[in.rs]);
             }
-            if (have_slot && c->is_label[widx(an, a + 4)]) emit_slot_alias(c, a, &slot, 0);
+            if (slot_alias) { emit_slot_alias(c, a, &slot, 0); last_terminal = 0; }
             a += 4;
             continue;
         }
@@ -814,12 +830,13 @@ static void emit_function(ectx *c, const a_func *fn) {
         if (in.is_jump) {                        /* j */
             if (have_slot) { comment(c, &slot); emit_simple(c, &slot, "    "); }
             if (owned_by(an, in.target, owner) && !is_function(an, in.target)) {
+                if (in.target <= a) fprintf(f, "    PSP_LOOP(0x%08Xu);\n", in.target);
                 fprintf(f, "    goto L_%08X;\n", in.target);
             } else {
                 emit_static_call(c, in.target);  /* tail call */
                 fprintf(f, "    return;\n");
             }
-            if (have_slot && c->is_label[widx(an, a + 4)]) emit_slot_alias(c, a, &slot, 0);
+            if (slot_alias) { emit_slot_alias(c, a, &slot, 0); last_terminal = 0; }
             a += 4;
             continue;
         }
