@@ -499,6 +499,15 @@ static int load_and_discover(const char *path, const char *seeds_path, psp_blob 
         return -1;
     }
 
+    /* Read the seeds file now so a bad one fails before the scans run. It is
+     * applied after the other sources, below. */
+    uint32_t *fs = NULL;
+    int nfs = 0;
+    if (seeds_path && a_read_seed_file(seeds_path, &fs, &nfs) != 0) {
+        psp_blob_free(b);
+        return -1;
+    }
+
     memset(an, 0, sizeof *an);
     /* Walk the whole loaded image, not just .text: a module can place
      * executable code outside it (C++ static initialisers, notably), and
@@ -541,7 +550,7 @@ static int load_and_discover(const char *path, const char *seeds_path, psp_blob 
     int nptr_avail = psp_collect_pointer_seeds(b->data, b->size, e, bias, NULL, 0);
     int cap = 1 + 512 + nptr_avail;
     uint32_t *seeds = (uint32_t *)malloc((size_t)cap * sizeof *seeds);
-    if (!seeds) { psp_blob_free(b); return -1; }
+    if (!seeds) { free(fs); psp_blob_free(b); return -1; }
 
     int nseeds = 0;
     seeds[nseeds++] = e->entry;
@@ -602,6 +611,7 @@ static int load_and_discover(const char *path, const char *seeds_path, psp_blob 
         uint32_t *bigger = (uint32_t *)realloc(seeds, (size_t)(nseeds + npair) * sizeof *seeds);
         if (!bigger) {
             fprintf(stderr, "discovery failed (out of memory)\n");
+            free(fs);
             free(seeds);
             psp_blob_free(b);
             return -1;
@@ -625,23 +635,34 @@ static int load_and_discover(const char *path, const char *seeds_path, psp_blob 
     }
 
     /* Seeds from a file (bbs.toml in khbbs): entries reached through
-     * pointers no scan can see. A seed outside the executable sections is
-     * almost certainly a typo, so it is reported and skipped. */
+     * pointers no scan can see. A seed that is misaligned or outside the
+     * executable sections is almost certainly a typo, so it is reported and
+     * skipped. "From file" counts the accepted ones; they may duplicate seeds
+     * from the other sources, which a_discover ignores. */
     if (seeds_path) {
-        uint32_t *fs = NULL;
-        int nfs = 0;
-        if (a_read_seed_file(seeds_path, &fs, &nfs) != 0) { free(seeds); psp_blob_free(b); return -1; }
         uint32_t *bigger = (uint32_t *)realloc(seeds, (size_t)(nseeds + nfs + 1) * sizeof *seeds);
-        if (!bigger) { free(fs); free(seeds); psp_blob_free(b); return -1; }
+        if (!bigger) {
+            fprintf(stderr, "discovery failed (out of memory)\n");
+            free(fs);
+            free(seeds);
+            psp_blob_free(b);
+            return -1;
+        }
         seeds = bigger;
         for (int i = 0; i < nfs; i++) {
-            if (seed_in_code(e, fs[i]) && (fs[i] & 3) == 0) { seeds[nseeds++] = fs[i]; st->nfile++; }
-            else {
+            if ((fs[i] & 3) != 0) {
+                fprintf(stderr, "%s: 0x%08X is not word-aligned, ignored\n", seeds_path, fs[i]);
+                st->nfile_ignored++;
+            } else if (!seed_in_code(e, fs[i])) {
                 fprintf(stderr, "%s: 0x%08X is not in an executable section, ignored\n", seeds_path, fs[i]);
                 st->nfile_ignored++;
+            } else {
+                seeds[nseeds++] = fs[i];
+                st->nfile++;
             }
         }
         free(fs);
+        fs = NULL;
     }
 
     int rc = a_discover(an, seeds, nseeds);
@@ -1067,7 +1088,11 @@ static int parse_opts(int argc, char **argv, int from,
         }
         if (first == argc) first = i;
         if (list && !strcmp(argv[i], "--list")) { *list = 1; continue; }
-        if (seeds && !strcmp(argv[i], "--seeds") && i + 1 < argc) { *seeds = argv[++i]; continue; }
+        if (seeds && !strcmp(argv[i], "--seeds") && i + 1 < argc) {
+            if (*seeds) { fprintf(stderr, "--seeds given twice\n"); return -1; }
+            *seeds = argv[++i];
+            continue;
+        }
         if (split && !strcmp(argv[i], "--split") && i + 1 < argc) {
             char *end = NULL;
             long v = strtol(argv[i + 1], &end, 10);
@@ -1098,7 +1123,7 @@ int main(int argc, char **argv) {
         const char *seeds = NULL;
         int first = parse_opts(argc, argv, 3, NULL, &seeds, &list);
         if (first < 0) return 2;
-        if (first != 3) return usage();          /* exactly one positional */
+        if (first != 3 || argv[2][0] == '-') return usage();   /* exactly one positional */
         return cmd_funcs(argv[2], list, seeds);
     }
     if (!strcmp(cmd, "emit")) {
@@ -1108,6 +1133,8 @@ int main(int argc, char **argv) {
         int first = parse_opts(argc, argv, 4, &split, &seeds, NULL);
         if (first < 0) return 2;
         if (first > 5) return usage();           /* file, outdir, optional prefix */
+        for (int i = 2; i < first; i++)
+            if (argv[i][0] == '-') return usage();
         return cmd_emit(argv[2], argv[3], first > 4 ? argv[4] : NULL, split, seeds);
     }
     if (!strcmp(cmd, "extract")) {
