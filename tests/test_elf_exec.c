@@ -74,7 +74,7 @@ int main(void) {
         put32(b2 + 32, 0x200);
         put16(b2 + 42, 32);
         put16(b2 + 46, 40);
-        memcpy(b2 + 0x180, "\0.x\0.shstrtab", 15);
+        memcpy(b2 + 0x180, "\0.x\0.shstrtab", sizeof "\0.x\0.shstrtab");
         uint8_t *t = b2 + 0x200;
         shdr(t + 40 * 1, 1, 1, 0x6, 0x08804000, 0x100, 0x40);
         shdr(t + 40 * 2, 1, 1, 0x6, 0x08804040, 0x140, 0x20);
