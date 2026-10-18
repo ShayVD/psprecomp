@@ -550,6 +550,19 @@ static int load_and_discover(const char *path, psp_blob *b, elf_info *e,
                 nptr = a_scan_data_pointers(an, b->data + data_off, region_len,
                                             seeds + nseeds, avail);
                 if (nptr > avail) nptr = avail;
+                /* A heuristic pointer is only trusted as a *code* seed if it
+                 * lands in .text (or .init, which crt0 reaches by address).
+                 * Pointers into .rodata/.data are strings, tables and
+                 * vtables-of-data, and seeding them produced thousands of
+                 * "functions" made of data. */
+                int kept = 0;
+                for (int i = 0; i < nptr; i++) {
+                    uint32_t p = seeds[nseeds + i];
+                    int in_text = p >= e->text_addr && p < e->text_addr + e->text_size;
+                    int is_init = p == e->seg[0].addr;
+                    if (in_text || is_init) seeds[nseeds + kept++] = p;
+                }
+                nptr = kept;
                 nseeds += nptr;
                 if (out_scanned) *out_scanned = 1;
             }
