@@ -994,8 +994,19 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "emit")) {
         if (argc < 4) return usage();
         int split = 0, npos = argc;
-        for (int i = 4; i < argc; i++)
-            if (!strcmp(argv[i], "--split") && i + 1 < argc) { split = atoi(argv[i + 1]); npos = i; break; }
+        for (int i = 4; i < argc; i++) {
+            if (strcmp(argv[i], "--split")) continue;
+            if (i + 1 >= argc) return usage();
+            char *end = NULL;
+            long v = strtol(argv[i + 1], &end, 10);
+            if (!*argv[i + 1] || *end || v < 1 || v > 999) {
+                fprintf(stderr, "--split must be between 1 and 999\n");
+                return 2;
+            }
+            split = (int)v;
+            npos = i;
+            break;
+        }
         return cmd_emit(argv[2], argv[3], npos > 4 ? argv[4] : NULL, split);
     }
     if (!strcmp(cmd, "extract")) {

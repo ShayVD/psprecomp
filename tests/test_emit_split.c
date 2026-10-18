@@ -65,8 +65,38 @@ int main(void) {
         expect(strstr(p1, "void psp_func_08804000(void) {") == NULL, "f0 not repeated in part 1");
         expect(strstr(reg, "void psp_recomp_register(void)") != NULL, "register function");
         expect(strstr(reg, "{ 0x08804020u, psp_func_08804020 },") != NULL, "f2 registered");
+        expect(strstr(reg, "{ 0u, 0 }") != NULL, "sentinel in register tables");
         expect(strstr(p0, "psp_recomp_register") == NULL && strstr(p0, "psp_recomp_funcs") == NULL, "no registration in parts");
     }
+    /* split larger than the function count: empty parts still exist */
+    o.prefix = "t_split5";
+    o.split = 5;
+    expect(a_emit(&an, &o) == 0, "emit split=5 succeeds");
+    for (int i = 3; i < 5; i++) {
+        char nm[64];
+        snprintf(nm, sizeof nm, "./t_split5_funcs_%03d.c", i);
+        char *p = slurp(nm);
+        expect(p != NULL, "empty part exists");
+        if (p) {
+            expect(strstr(p, "#include \"t_split5_funcs.h\"") != NULL, "empty part has include");
+            expect(strstr(p, "psp_func_") == NULL, "empty part has no functions");
+        }
+        remove(nm);
+    }
+    remove("./t_split5_funcs_000.c");
+    remove("./t_split5_funcs_001.c");
+    remove("./t_split5_funcs_002.c");
+    remove("./t_split5_register.c");
+    remove("./t_split5_funcs.h");
+    remove("./t_split5_imports.c");
+
+    /* out-of-range split is rejected */
+    o.prefix = "t_split1000";
+    o.split = 1000;
+    expect(a_emit(&an, &o) == -1, "split=1000 rejected");
+    remove("./t_split1000_funcs.h");
+    remove("./t_split1000_imports.c");
+
     remove("./t_split_funcs_000.c");
     remove("./t_split_funcs_001.c");
     remove("./t_split_register.c");

@@ -34,7 +34,7 @@ typedef struct {
     /* 0 or 1: one <prefix>_funcs.c with registration at the end (default).
      * N > 1: <prefix>_funcs_000.c .. <prefix>_funcs_<N-1>.c, each a
      * contiguous slice of the functions, plus <prefix>_register.c. All N
-     * files are always written, so a build system can list them up front. */
+     * files are always written, so a build system can list them up front. N must be <= 999 so file names stay 3 digits. */
     int                     split;
 } emit_opts;
 
