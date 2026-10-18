@@ -436,7 +436,9 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
         fprintf(f, "%spsp_vimm(%u, %.1ff);\n", ind, in->vd, (double)in->imm);
         return;
     case A_VFIM:
-        fprintf(f, "%spsp_vimm(%u, %.9gf);\n", ind, in->vd,
+        /* A cast, not an `f` suffix: "%.9g" prints integral values without a
+         * decimal point, and "-1f" is not a C literal. */
+        fprintf(f, "%spsp_vimm(%u, (float)%.9g);\n", ind, in->vd,
                 (double)half_to_float((uint16_t)in->imm));
         return;
 
