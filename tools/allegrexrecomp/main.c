@@ -17,6 +17,8 @@
 #include "keys.h"
 #include "crypto/kirk.h"
 
+#include "seeds.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,8 +34,8 @@ static int usage(void) {
         "  allegrexrecomp extract <file.iso> <substring> <outdir>\n"
         "  allegrexrecomp dis     <file> [start-addr] [count]\n"
         "  allegrexrecomp cover   <file>\n"
-        "  allegrexrecomp funcs   <file> [--list]\n"
-        "  allegrexrecomp emit    <file> <outdir> [prefix] [--split N]\n"
+        "  allegrexrecomp funcs   <file> [--list] [--seeds FILE]\n"
+        "  allegrexrecomp emit    <file> <outdir> [prefix] [--split N] [--seeds FILE]\n"
         "  allegrexrecomp decrypt <file> [--keys <path>]\n"
         "  allegrexrecomp kirk1   <file> [out] [--keys <path>]\n"
         "\n"
@@ -477,12 +479,14 @@ typedef struct {
     int nptr;        /* relocations, or scanned data pointers */
     int scanned;     /* nptr came from the heuristic data scan */
     int npair;       /* distinct targets of lui/addiu and lui/ori pairs in code */
+    int nfile;       /* taken from the --seeds file */
+    int nfile_ignored; /* in the --seeds file but not in an executable section */
 } seed_stats;
 
 /* Load a decrypted module and run discovery over it. On success the caller
  * owns both `b` (psp_blob_free) and `an` (a_analysis_free). Shared by `funcs`
  * and `emit`, which differ only in what they do with the result. */
-static int load_and_discover(const char *path, psp_blob *b, elf_info *e,
+static int load_and_discover(const char *path, const char *seeds_path, psp_blob *b, elf_info *e,
                              a_analysis *an, seed_stats *st) {
     memset(st, 0, sizeof *st);
     if (psp_blob_read(path, b) != 0) { fprintf(stderr, "cannot read %s\n", path); return -1; }
@@ -620,6 +624,26 @@ static int load_and_discover(const char *path, psp_blob *b, elf_info *e,
         nseeds += npair;
     }
 
+    /* Seeds from a file (bbs.toml in khbbs): entries reached through
+     * pointers no scan can see. A seed outside the executable sections is
+     * almost certainly a typo, so it is reported and skipped. */
+    if (seeds_path) {
+        uint32_t *fs = NULL;
+        int nfs = 0;
+        if (a_read_seed_file(seeds_path, &fs, &nfs) != 0) { free(seeds); psp_blob_free(b); return -1; }
+        uint32_t *bigger = (uint32_t *)realloc(seeds, (size_t)(nseeds + nfs + 1) * sizeof *seeds);
+        if (!bigger) { free(fs); free(seeds); psp_blob_free(b); return -1; }
+        seeds = bigger;
+        for (int i = 0; i < nfs; i++) {
+            if (seed_in_code(e, fs[i]) && (fs[i] & 3) == 0) { seeds[nseeds++] = fs[i]; st->nfile++; }
+            else {
+                fprintf(stderr, "%s: 0x%08X is not in an executable section, ignored\n", seeds_path, fs[i]);
+                st->nfile_ignored++;
+            }
+        }
+        free(fs);
+    }
+
     int rc = a_discover(an, seeds, nseeds);
     free(seeds);
     if (rc != 0) {
@@ -635,21 +659,22 @@ static int load_and_discover(const char *path, psp_blob *b, elf_info *e,
     return 0;
 }
 
-static int cmd_funcs(const char *path, int list) {
+static int cmd_funcs(const char *path, int list, const char *seeds_path) {
     psp_blob b;
     elf_info e;
     a_analysis an;
     seed_stats st;
 
-    if (load_and_discover(path, &b, &e, &an, &st) != 0) return 1;
+    if (load_and_discover(path, seeds_path, &b, &e, &an, &st) != 0) return 1;
 
     printf("module:     %s\n", path);
     printf("code:       0x%08X + %u bytes  (%u instructions)\n",
            an.base, an.size, an.size / 4);
-    printf("seeds:      %d (entry 0x%08X + %d exports + %d %s + %d address pairs)\n",
+    printf("seeds:      %d (entry 0x%08X + %d exports + %d %s + %d address pairs + %d from file)\n",
            st.nseeds, e.entry, st.nexports, st.nptr,
            st.scanned ? "scanned data pointers (heuristic)" : "relocation pointers",
-           st.npair);
+           st.npair, st.nfile);
+    if (st.nfile_ignored) printf("seeds file: %d ignored\n", st.nfile_ignored);
     printf("\n");
     printf("functions:  %d\n", an.nfuncs);
     /* `an.size` is the whole loaded image -- code plus .data plus .bss -- so
@@ -767,13 +792,14 @@ static int cmd_funcs(const char *path, int list) {
 
 /* ---- the emitter --------------------------------------------------------- */
 
-static int cmd_emit(const char *path, const char *outdir, const char *prefix, int split) {
+static int cmd_emit(const char *path, const char *outdir, const char *prefix, int split,
+                    const char *seeds_path) {
     psp_blob b;
     elf_info e;
     a_analysis an;
 
     seed_stats st;
-    if (load_and_discover(path, &b, &e, &an, &st) != 0) return 1;
+    if (load_and_discover(path, seeds_path, &b, &e, &an, &st) != 0) return 1;
 
     psp_module_info mi;
     const char *module = "(unknown)";
@@ -1027,6 +1053,38 @@ static int cmd_kirk1(const char *path, const char *outpath, const char *keypath)
 
 /* ---- main ---------------------------------------------------------------- */
 
+/* Options after the positional arguments of `funcs` and `emit`, in any
+ * order. A NULL out-pointer means the command does not take that option.
+ * Returns the index of the first option (argc if none), so the caller can
+ * check how many positionals it got, or -1 after printing what is wrong. */
+static int parse_opts(int argc, char **argv, int from,
+                      int *split, const char **seeds, int *list) {
+    int first = argc;
+    for (int i = from; i < argc; i++) {
+        if (argv[i][0] != '-') {
+            if (first < argc) { fprintf(stderr, "unexpected argument %s\n", argv[i]); return -1; }
+            continue;
+        }
+        if (first == argc) first = i;
+        if (list && !strcmp(argv[i], "--list")) { *list = 1; continue; }
+        if (seeds && !strcmp(argv[i], "--seeds") && i + 1 < argc) { *seeds = argv[++i]; continue; }
+        if (split && !strcmp(argv[i], "--split") && i + 1 < argc) {
+            char *end = NULL;
+            long v = strtol(argv[i + 1], &end, 10);
+            if (!*argv[i + 1] || *end || v < 1 || v > 999) {
+                fprintf(stderr, "--split must be between 1 and 999\n");
+                return -1;
+            }
+            *split = (int)v;
+            i++;
+            continue;
+        }
+        fprintf(stderr, "unknown or incomplete option %s\n", argv[i]);
+        return -1;
+    }
+    return first;
+}
+
 int main(int argc, char **argv) {
     if (argc < 3) return usage();
 
@@ -1035,24 +1093,22 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "info"))    return cmd_info(argv[2]);
     if (!strcmp(cmd, "ls"))      return cmd_ls(argv[2]);
     if (!strcmp(cmd, "cover"))   return cmd_cover(argv[2]);
-    if (!strcmp(cmd, "funcs"))   return cmd_funcs(argv[2], argc > 3 && !strcmp(argv[3], "--list"));
+    if (!strcmp(cmd, "funcs")) {
+        int list = 0;
+        const char *seeds = NULL;
+        int first = parse_opts(argc, argv, 3, NULL, &seeds, &list);
+        if (first < 0) return 2;
+        if (first != 3) return usage();          /* exactly one positional */
+        return cmd_funcs(argv[2], list, seeds);
+    }
     if (!strcmp(cmd, "emit")) {
         if (argc < 4) return usage();
-        int split = 0, npos = argc;
-        for (int i = 4; i < argc; i++) {
-            if (strcmp(argv[i], "--split")) continue;
-            if (i + 1 >= argc) return usage();
-            char *end = NULL;
-            long v = strtol(argv[i + 1], &end, 10);
-            if (!*argv[i + 1] || *end || v < 1 || v > 999) {
-                fprintf(stderr, "--split must be between 1 and 999\n");
-                return 2;
-            }
-            split = (int)v;
-            npos = i;
-            break;
-        }
-        return cmd_emit(argv[2], argv[3], npos > 4 ? argv[4] : NULL, split);
+        int split = 0;
+        const char *seeds = NULL;
+        int first = parse_opts(argc, argv, 4, &split, &seeds, NULL);
+        if (first < 0) return 2;
+        if (first > 5) return usage();           /* file, outdir, optional prefix */
+        return cmd_emit(argv[2], argv[3], first > 4 ? argv[4] : NULL, split, seeds);
     }
     if (!strcmp(cmd, "extract")) {
         if (argc < 5) return usage();

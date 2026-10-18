@@ -8,6 +8,7 @@ add_library(allegrex_core STATIC
     decode.c
     container.c
     analyze.c
+    seeds.c
     emit.c
     keys.c
     crypto/aes.c

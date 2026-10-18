@@ -63,3 +63,7 @@ add_test(NAME hle_trace COMMAND test_hle_trace)
 add_executable(test_analyze_pairs test_analyze_pairs.c)
 target_link_libraries(test_analyze_pairs PRIVATE allegrex_core)
 add_test(NAME analyze_pairs COMMAND test_analyze_pairs)
+
+add_executable(test_seeds test_seeds.c)
+target_link_libraries(test_seeds PRIVATE allegrex_core)
+add_test(NAME seeds COMMAND test_seeds)
