@@ -46,6 +46,15 @@ typedef struct {
     unsigned has_vfpu    : 1;   /* touches the VFPU */
 } a_func;
 
+/* A switch table recovered at a `jr $rN` site. Its targets, in table order
+ * (duplicates kept), are an->jt_targets[first .. first + count). */
+typedef struct {
+    uint32_t site;      /* the jr */
+    uint32_t table;     /* the table, in .rodata */
+    uint32_t first;
+    uint32_t count;     /* the bound from the sltiu */
+} a_jtable;
+
 typedef struct {
     /* Input */
     const uint8_t *code;
@@ -97,9 +106,15 @@ typedef struct {
     uint32_t *indirects;        /* sites with an unresolved computed jump */
     int       nindirects;
 
-    /* Jump tables recovered from the `jr $rN` sites. */
-    int       ntables;          /* tables resolved */
-    int       ntable_targets;   /* total entries across them */
+    /* Jump tables recovered from the `jr $rN` sites. They are resolved as
+     * the walk reaches each jr, so their targets are blocks of the function
+     * containing the switch. */
+    int       ntables;          /* tables resolved (== njtables) */
+    int       ntable_targets;   /* total entries across them (== njt_targets) */
+    a_jtable *jtables;          /* sorted by site */
+    int       njtables;
+    uint32_t *jt_targets;
+    int       njt_targets;
 
     /* Statistics over *discovered* code only — the number that matters, as
      * opposed to coverage over a whole segment that is mostly data. */
@@ -168,6 +183,9 @@ void a_analysis_free(a_analysis *an);
 
 /* Is `addr` inside the discovered code extent? */
 int a_in_range(const a_analysis *an, uint32_t addr);
+
+/* The table recovered for the jr at `site`, or NULL. */
+const a_jtable *a_find_jtable(const a_analysis *an, uint32_t site);
 
 #ifdef __cplusplus
 }

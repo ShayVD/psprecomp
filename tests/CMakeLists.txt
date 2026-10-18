@@ -67,3 +67,7 @@ add_test(NAME analyze_pairs COMMAND test_analyze_pairs)
 add_executable(test_seeds test_seeds.c)
 target_link_libraries(test_seeds PRIVATE allegrex_core)
 add_test(NAME seeds COMMAND test_seeds)
+
+add_executable(test_switch test_switch.c)
+target_link_libraries(test_switch PRIVATE allegrex_core)
+add_test(NAME switch COMMAND test_switch)

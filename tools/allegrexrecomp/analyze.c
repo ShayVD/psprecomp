@@ -85,7 +85,272 @@ static int gpr_written(const a_insn *in) {
     }
 }
 
+/* ---- jump tables --------------------------------------------------------- */
+
+/* MIPS compiles a `switch` into a bounds check, a scaled index, a table load
+ * and an indirect jump. SNC, which built this game, writes it as
+ *
+ *     sltiu $a2, $a0, N           bounds check -- N is the entry count
+ *     beq   $a2, $zero, default
+ *     sll   $a0, $a0, 2           scale to a word index
+ *     lui   $at, %hi(table)
+ *     addu  $at, $at, $a0
+ *     lw    $at, %lo(table)($at)  load the target
+ *     jr    $at
+ *
+ * Recovering it means walking backward from the `jr` for the `lw` that fed it,
+ * then for the `addu` that formed its address, then for the `lui` (or
+ * lui+addiu/ori) that built the table's base, then for the sltiu that bounded
+ * it. The instructions may be interleaved with unrelated ones, so the search
+ * is by register rather than by position.
+ *
+ * The result is cheap to *verify*, which is what makes this safe: every entry
+ * must land inside .text, be instruction-aligned, and decode as a valid
+ * instruction. A misidentified table fails those and is rejected wholesale
+ * rather than seeding garbage.
+ */
+
+static uint32_t image_read32(const a_analysis *an, uint32_t addr) {
+    if (!an->image) return 0;
+    if (addr < an->image_base || addr + 4 > an->image_base + an->image_size) return 0;
+    const uint8_t *p = an->image + (addr - an->image_base);
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/* How far back to look. A compiler keeps the whole idiom close together; a
+ * wider window mostly finds unrelated instructions that happen to match. */
+#define JT_WINDOW 24
+#define JT_MAX_ENTRIES 512
+
+/* Does straight-line flow end here? A call (the callee clobbers the
+ * caller-saved registers, which gpr_written does not report) or an
+ * unconditional transfer (j, jr, jalr, `b` = beq $zero, $zero: what follows
+ * its delay slot is not reached from it). Walking backward across one would
+ * pair the idiom with values that do not reach the jr. */
+static int ends_straight_line(const a_insn *in) {
+    return in->is_call || in->is_jump ||
+           (in->op == A_BEQ && in->rs == 0 && in->rt == 0);
+}
+
+/* One step of a backward walk along the fall-through path: decode `a` into
+ * *out and say whether it runs on the way to where the walk started.
+ *
+ *   STEP_ON    it does
+ *   STEP_SKIP  it does not, but the line continues before it: `a` is the
+ *              delay slot of a branch-likely, which is nullified on the
+ *              fall-through path (`beql $t, $zero, x; lw $a1, ..` only
+ *              loads $a1 when the branch is taken)
+ *   STEP_STOP  the line ends: `a` is a call or an unconditional transfer,
+ *              or the delay slot of one (the slot runs before the transfer,
+ *              not on the way to what follows), or outside the code */
+enum { STEP_STOP, STEP_ON, STEP_SKIP };
+
+static int step_back(const a_analysis *an, uint32_t a, a_insn *out) {
+    if (!a_in_range(an, a)) return STEP_STOP;
+    a_decode(fetch(an, a), a, out);
+    if (ends_straight_line(out)) return STEP_STOP;
+    if (a_in_range(an, a - 4)) {
+        a_insn prev;
+        a_decode(fetch(an, a - 4), a - 4, &prev);
+        if (ends_straight_line(&prev)) return STEP_STOP;
+        if (prev.is_branch && prev.is_likely) return STEP_SKIP;
+    }
+    return STEP_ON;
+}
+
+/* The nearest instruction before `from` that writes `reg`, within
+ * JT_WINDOW and inside one straight line of code (see step_back).
+ * Returns its address and decodes it into *out, or returns 0. */
+static uint32_t last_writer(const a_analysis *an, uint32_t from, int reg, a_insn *out) {
+    for (int i = 1; i <= JT_WINDOW; i++) {
+        uint32_t a = from - (uint32_t)i * 4;
+        const int st = step_back(an, a, out);
+        if (st == STEP_STOP) return 0;
+        if (st == STEP_ON && gpr_written(out) == reg) return a;
+    }
+    return 0;
+}
+
+/* The constant `reg` holds just before `from`, if it was built by `lui`
+ * alone or by `lui` + `addiu`/`ori`. */
+static int const_before(const a_analysis *an, uint32_t from, int reg, uint32_t *val) {
+    a_insn w;
+    uint32_t a = last_writer(an, from, reg, &w);
+    if (!a) return 0;
+    if (w.op == A_LUI) { *val = (uint32_t)w.imm << 16; return 1; }
+    if (w.op == A_ADDIU || w.op == A_ORI) {
+        a_insn h;
+        if (!last_writer(an, a, w.rs, &h) || h.op != A_LUI) return 0;
+        *val = ((uint32_t)h.imm << 16) + (uint32_t)w.imm;
+        return 1;
+    }
+    return 0;
+}
+
+/* Is the `slt[i]u $t, ...` at `at` an upper-bound test, i.e. is $t next
+ * tested by `beq $t, $zero` (out of range when $t is 0, the switch on the
+ * fall-through) before `end`? A `bne` on it is a lower-bound test, and a
+ * result overwritten or never tested bounds nothing. The caller has already
+ * walked [at, end) as one straight line. */
+static int is_upper_bound(const a_analysis *an, uint32_t at, uint32_t end, int t) {
+    for (uint32_t b = at + 4; b < end; b += 4) {
+        a_insn in;
+        if (step_back(an, b, &in) == STEP_SKIP) continue;
+        if (in.is_branch && ((in.rs == t && in.rt == 0) || (in.rs == 0 && in.rt == t)))
+            return in.op == A_BEQ || in.op == A_BEQL;
+        if (gpr_written(&in) == t) return 0;
+    }
+    return 0;
+}
+
+/* Where the value `reg` holds just before `from` came from, looking through
+ * copies and constant offsets, walking back no further than `floor`: the
+ * value is root + delta, where root is what `root_reg` held just after
+ * `root_at`. `root_at` is the instruction that computed it, or the address
+ * where the walk ended without finding one (a call or unconditional
+ * transfer, the edge of the code, or past `floor`): the value was live
+ * there. Two walks along the same straight line with the same floor end at
+ * the same place, so equal roots mean equal values. Returns 0 only for a
+ * constant zero, which is not a key. */
+#define JT_VALUE_WINDOW (JT_WINDOW * 2)
+
+static int value_root(const a_analysis *an, uint32_t from, uint32_t floor, int reg,
+                      uint32_t *root_at, int *root_reg, int64_t *delta) {
+    int64_t d = 0;
+    uint32_t a = from - 4;
+    for (; a >= floor; a -= 4) {
+        a_insn in;
+        const int st = step_back(an, a, &in);
+        if (st == STEP_STOP) break;
+        if (st == STEP_SKIP || gpr_written(&in) != reg) continue;
+        if (in.op == A_ADDIU) { d += in.imm; reg = in.rs; }
+        else if ((in.op == A_OR || in.op == A_ADDU) && (in.rs == 0 || in.rt == 0))
+            reg = in.rs ? in.rs : in.rt;
+        else break;                             /* computed here */
+        if (!reg) return 0;
+    }
+    *root_at = a; *root_reg = reg; *delta = d;
+    return 1;
+}
+
+/* The entry count of a table indexed by `sll $idx, $key, 2` at `sll_addr`.
+ *
+ * SNC bounds a switch whose cases start at 0 with `sltiu $t, $key, N`, and
+ * one whose cases start at LO with a signed range test and a bias:
+ *
+ *     slti  $a1, $a0, HI          upper bound
+ *     beq   $a1, $zero, default
+ *     addiu $a0, $a0, -LO         (the lower bound is tested before this)
+ *     sll   $a0, $a0, 2
+ *
+ * or bounds a biased copy (`addiu $a1, $a0, -1; sltiu $a1, $a1, 16; ...;
+ * addiu $a1, $a0, -1; sll $a1, $a1, 2`). So both the key and the bounded
+ * register are traced back to the value they are built from (value_root):
+ * the bound applies when that is the same value, and the count is the bound
+ * corrected by the two offsets (HI - LO above). The bound must feed a `beq`
+ * (see is_upper_bound). */
+static int switch_bound(const a_analysis *an, uint32_t sll_addr, int key) {
+    const uint32_t floor = sll_addr - (uint32_t)JT_VALUE_WINDOW * 4;
+    uint32_t kat; int kreg; int64_t kd;
+    if (!value_root(an, sll_addr, floor, key, &kat, &kreg, &kd)) return 0;
+    for (int i = 1; i <= JT_VALUE_WINDOW; i++) {
+        const uint32_t a = sll_addr - (uint32_t)i * 4;
+        a_insn in;
+        const int st = step_back(an, a, &in);
+        if (st == STEP_STOP) return 0;
+        if (st == STEP_SKIP) continue;
+        if (a <= kat) return 0;                 /* before the key existed */
+        if ((in.op != A_SLTIU && in.op != A_SLTI) || in.imm <= 0 ||
+            !is_upper_bound(an, a, sll_addr, in.rt))
+            continue;
+        uint32_t bat; int breg; int64_t bd;
+        if (!value_root(an, a, floor, in.rs, &bat, &breg, &bd) || bat != kat || breg != kreg)
+            continue;
+        /* key = root + kd, bounded = root + bd < N, so key < N - bd + kd. */
+        const int64_t n = (int64_t)in.imm - bd + kd;
+        return n >= 2 && n <= JT_MAX_ENTRIES ? (int)n : 0;
+    }
+    return 0;
+}
+
+static int in_scan(const a_analysis *an, uint32_t addr) {
+    const uint32_t sbase = an->scan_size ? an->scan_base : an->base;
+    const uint32_t ssize = an->scan_size ? an->scan_size : an->size;
+    return addr >= sbase && addr - sbase < ssize && (addr & 3) == 0 && a_in_range(an, addr);
+}
+
+/* Recover the table behind the `jr` at `site`. On success appends its
+ * entries to `out`, sets *table_out and returns the count; otherwise
+ * returns 0 and leaves `out` as it was.
+ *
+ *   lw   $rN, lo($base)     the jr's register, loaded from the table
+ *   addu $base, $x, $y      one of $x/$y is the table's high half (lui),
+ *                           or lui+addiu/ori; the other is the scaled index
+ *   sll  $idx, $key, 2      the scaling
+ *   sltiu/slti $t, $key, N  the bound, required (see switch_bound)
+ *
+ * SNC writes the table's low half as the lw offset (`lui $at; addu $at,
+ * $at, $idx; lw $at, lo($at)`); other compilers fold it into an addiu and
+ * use offset 0. Both are covered because the lw offset is always added.
+ * Every entry inside the bound must be an instruction in the scan range
+ * (.text), or the whole table is rejected. */
+static int resolve_jump_table(const a_analysis *an, uint32_t site, u32list *out,
+                              uint32_t *table_out) {
+    if (!an->image) return 0;
+    a_insn jr;
+    a_decode(fetch(an, site), site, &jr);
+
+    a_insn lw;
+    const uint32_t lw_addr = last_writer(an, site, jr.rs, &lw);
+    if (!lw_addr || lw.op != A_LW) return 0;
+
+    a_insn add;
+    const uint32_t add_addr = last_writer(an, lw_addr, lw.rs, &add);
+    if (!add_addr || add.op != A_ADDU) return 0;
+    uint32_t base;
+    int idx;
+    if (const_before(an, add_addr, add.rs, &base))      idx = add.rt;
+    else if (const_before(an, add_addr, add.rt, &base)) idx = add.rs;
+    else return 0;
+    const uint32_t table = base + (uint32_t)lw.imm;
+
+    a_insn sc;
+    const uint32_t sll_addr = last_writer(an, add_addr, idx, &sc);
+    if (!sll_addr || sc.op != A_SLL || sc.sa != 2) return 0;
+    const int n = switch_bound(an, sll_addr, sc.rt);
+    if (n < 2) return 0;
+    const uint32_t limit = (uint32_t)n;
+
+    const int start = out->n;
+    for (uint32_t i = 0; i < limit; i++) {
+        uint32_t entry = image_read32(an, table + i * 4);
+        a_insn probe;
+        if (!in_scan(an, entry) || !a_decode(fetch(an, entry), entry, &probe) ||
+            probe.op == A_INVALID || u32_push(out, entry) != 0) {
+            out->n = start;
+            return 0;
+        }
+    }
+    *table_out = table;
+    return (int)limit;
+}
+
 /* ---- the walk ------------------------------------------------------------ */
+
+typedef struct jtlist { a_jtable *v; int n, cap; } jtlist;
+
+static int jt_push(jtlist *l, a_jtable t) {
+    if (l->n == l->cap) {
+        int cap = l->cap ? l->cap * 2 : 64;
+        a_jtable *v = (a_jtable *)realloc(l->v, (size_t)cap * sizeof *v);
+        if (!v) return -1;
+        l->v = v;
+        l->cap = cap;
+    }
+    l->v[l->n++] = t;
+    return 0;
+}
 
 typedef struct {
     a_analysis *an;
@@ -106,6 +371,9 @@ typedef struct {
     /* Branch targets already claimed by an earlier walk; promoted to entries
      * between rounds so they become reachable through dispatch. */
     u32list    *cross;
+    /* Switch tables recovered so far, and their targets. */
+    jtlist     *jtables;
+    u32list    *jt_targets;
 } walk_ctx;
 
 static int is_known_entry(const walk_ctx *c, uint32_t addr) {
@@ -224,10 +492,28 @@ static int trace_function(walk_ctx *c, uint32_t entry, a_func *out) {
             if (in.is_return) { has_return = 1; break; }
 
             if (in.is_indirect) {
-                /* `jr $rN` — a computed jump, usually a switch table. We
-                 * cannot follow it without resolving the table, so record the
-                 * site and stop. These are the concrete targets for jump-table
-                 * analysis; they are counted rather than silently dropped. */
+                /* `jr $rN`. A recovered switch table turns it into ordinary
+                 * control flow: its targets are blocks of this function,
+                 * claimed exactly like conditional-branch targets. */
+                uint32_t table = 0;
+                const int first = c->jt_targets->n;
+                const int n = resolve_jump_table(an, a, c->jt_targets, &table);
+                if (n > 0) {
+                    a_jtable jt = { a, table, (uint32_t)first, (uint32_t)n };
+                    if (jt_push(c->jtables, jt) == 0) {
+                        for (int k = first; k < first + n; k++) {
+                            const uint32_t t = c->jt_targets->v[k];
+                            const uint32_t ti = word_index(an, t);
+                            if ((c->seen[ti] & SEEN_CODE) && !c->entry_map[ti]) u32_push(c->cross, t);
+                            else u32_push(&blocks, t);
+                        }
+                        break;
+                    }
+                    c->jt_targets->n = first;    /* out of memory: unresolved */
+                }
+                /* Unresolved: a computed jump we cannot follow. Record the site
+                 * and stop; the sites are counted rather than silently
+                 * dropped. */
                 has_indirect = 1;
                 if (!u32_contains(c->indirects, a)) u32_push(c->indirects, a);
                 break;
@@ -330,165 +616,24 @@ static int trace_function(walk_ctx *c, uint32_t entry, a_func *out) {
     return 0;
 }
 
-/* ---- jump tables --------------------------------------------------------- */
-
-/* MIPS compiles a `switch` into a bounds check, a scaled index, a table load
- * and an indirect jump:
- *
- *     sltiu $at, $key, N          bounds check -- N is the entry count
- *     beqz  $at, default
- *     sll   $t0, $key, 2          scale to a word index
- *     lui   $t1, %hi(table)
- *     addu  $t0, $t0, $t1
- *     lw    $t0, %lo(table)($t0)  load the target
- *     jr    $t0
- *
- * Recovering it means walking backward from the `jr` for the `lw` that fed it,
- * then for the lui/addiu pair that formed the address, then for the sltiu that
- * bounded it. The instructions may be interleaved with unrelated ones, so the
- * search is by register rather than by position.
- *
- * The result is cheap to *verify*, which is what makes this safe: every entry
- * must land inside .text, be instruction-aligned, and decode as a valid
- * instruction. A misidentified table fails those and is rejected wholesale
- * rather than seeding garbage.
- */
-
-static uint32_t image_read32(const a_analysis *an, uint32_t addr) {
-    if (!an->image) return 0;
-    if (addr < an->image_base || addr + 4 > an->image_base + an->image_size) return 0;
-    const uint8_t *p = an->image + (addr - an->image_base);
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-
-/* How far back to look. A compiler keeps the whole idiom close together; a
- * wider window mostly finds unrelated instructions that happen to match. */
-#define JT_WINDOW 24
-#define JT_MAX_ENTRIES 512
-
-static int resolve_jump_table(a_analysis *an, uint32_t site, u32list *out) {
-    if (!an->image) return 0;
-
-    a_insn jr;
-    a_decode(fetch(an, site), site, &jr);
-    const uint8_t target_reg = jr.rs;
-
-    /* Walk back for `lw target_reg, lo(base)`. */
-    uint32_t lw_addr = 0;
-    a_insn lw;
-    memset(&lw, 0, sizeof lw);
-    for (int i = 1; i <= JT_WINDOW; i++) {
-        uint32_t a = site - (uint32_t)i * 4;
-        if (!a_in_range(an, a)) break;
-        a_insn in;
-        a_decode(fetch(an, a), a, &in);
-        if (in.op == A_LW && in.rt == target_reg) { lw = in; lw_addr = a; break; }
-        /* If something else wrote the register first, this is not the idiom. */
-        if (in.op == A_ADDIU && in.rt == target_reg) return 0;
-    }
-    if (!lw_addr) return 0;
-
-    /* The lw's base is `index + tablebase`, formed by an `addu`. One operand
-     * is the scaled index (from `sll`), the other is the table address. The
-     * address itself is built as lui+addiu -- NOT as the lw's displacement,
-     * which is typically zero:
-     *
-     *     lui   $t3, %hi(table)
-     *     sll   $t0, $key, 2
-     *     addiu $t2, $t3, %lo(table)
-     *     addu  $t0, $t0, $t2
-     *     lw    $rN, 0($t0)
-     *
-     * An earlier attempt looked for the low half in the lw displacement, which
-     * is the other common form, and so matched nothing here. */
-    uint8_t cand[2];
-    int ncand = 0;
-    for (int i = 1; i <= JT_WINDOW && ncand == 0; i++) {
-        uint32_t a = lw_addr - (uint32_t)i * 4;
-        if (!a_in_range(an, a)) break;
-        a_insn in;
-        a_decode(fetch(an, a), a, &in);
-        if (in.op == A_ADDU && in.rd == lw.rs) {
-            cand[0] = in.rs;
-            cand[1] = in.rt;
-            ncand = 2;
-        }
-    }
-    if (!ncand) return 0;
-
-    /* Whichever operand traces back to an lui+addiu pair is the table base;
-     * the other is the index. */
-    uint32_t table = 0;
-    int found = 0;
-    for (int k = 0; k < 2 && !found; k++) {
-        uint8_t reg = cand[k];
-        for (int i = 1; i <= JT_WINDOW && !found; i++) {
-            uint32_t a = lw_addr - (uint32_t)i * 4;
-            if (!a_in_range(an, a)) break;
-            a_insn ai;
-            a_decode(fetch(an, a), a, &ai);
-            if (ai.op != A_ADDIU || ai.rt != reg) continue;
-
-            /* Found the low half; now the lui that set its source. */
-            for (int j = 1; j <= JT_WINDOW; j++) {
-                uint32_t b = a - (uint32_t)j * 4;
-                if (!a_in_range(an, b)) break;
-                a_insn li;
-                a_decode(fetch(an, b), b, &li);
-                if (li.op == A_LUI && li.rt == ai.rs) {
-                    table = ((uint32_t)li.imm << 16) + (uint32_t)ai.imm
-                          + (uint32_t)lw.imm;
-                    found = 1;
-                    break;
-                }
-            }
-        }
-    }
-    if (!found) return 0;
-
-    /* Bound the entry count with the sltiu, if we can find it. Without one,
-     * fall back to reading until an entry stops looking like code -- which the
-     * per-entry validation below makes safe. */
-    uint32_t limit = JT_MAX_ENTRIES;
-    for (int i = 1; i <= JT_WINDOW * 2; i++) {
-        uint32_t a = site - (uint32_t)i * 4;
-        if (!a_in_range(an, a)) break;
-        a_insn in;
-        a_decode(fetch(an, a), a, &in);
-        if (in.op == A_SLTIU && in.imm > 0 && (uint32_t)in.imm <= JT_MAX_ENTRIES) {
-            limit = (uint32_t)in.imm;
-            break;
-        }
-    }
-
-    /* Read and validate. Every entry must be code; the first that is not ends
-     * the table. A table that yields nothing valid is rejected entirely. */
-    int taken = 0;
-    for (uint32_t i = 0; i < limit; i++) {
-        uint32_t entry = image_read32(an, table + i * 4);
-        if (!a_in_range(an, entry)) break;
-
-        a_insn probe;
-        if (!a_decode(fetch(an, entry), entry, &probe) || probe.op == A_INVALID) break;
-
-        u32_push(out, entry);
-        taken++;
-    }
-
-    /* One entry is not evidence of a table -- a single plausible word turns up
-     * by chance. Two consecutive valid code pointers is a much stronger
-     * signal. */
-    if (taken < 2) {
-        out->n -= taken;
-        return 0;
-    }
-    return taken;
-}
-
 static int cmp_func(const void *a, const void *b) {
     uint32_t x = ((const a_func *)a)->addr, y = ((const a_func *)b)->addr;
     return (x > y) - (x < y);
+}
+
+static int cmp_jtable(const void *a, const void *b) {
+    uint32_t x = ((const a_jtable *)a)->site, y = ((const a_jtable *)b)->site;
+    return (x > y) - (x < y);
+}
+
+const a_jtable *a_find_jtable(const a_analysis *an, uint32_t site) {
+    int lo = 0, hi = an->njtables - 1;
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (an->jtables[mid].site == site) return &an->jtables[mid];
+        if (an->jtables[mid].site < site) lo = mid + 1; else hi = mid - 1;
+    }
+    return NULL;
 }
 
 int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
@@ -497,6 +642,8 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
     an->indirects = NULL; an->nindirects = 0;
     an->insns = an->vfpu = an->invalid = 0;
     an->ntables = an->ntable_targets = 0;
+    an->jtables = NULL; an->njtables = 0;
+    an->jt_targets = NULL; an->njt_targets = 0;
     an->bytes_reached = 0;
     /* The import stubs sit at the end of .text, so their extent is the best
      * available executable bound when no section header gives one. */
@@ -515,8 +662,11 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
     for (uint32_t i = 0; i < nwords; i++) owner[i] = A_NO_OWNER;
 
     u32list queue = { 0 }, imports = { 0 }, indirects = { 0 }, cross = { 0 };
+    u32list jt_targets = { 0 };
+    jtlist jtables = { 0 };
     walk_ctx ctx = { an, seen, entry_map, owner, A_NO_OWNER,
-                     &queue, &imports, &indirects, &cross };
+                     &queue, &imports, &indirects, &cross,
+                     &jtables, &jt_targets };
 
     /* Pass 1: establish the complete set of function entries before walking
      * anything. Both the tail-call test and the ran-off-the-end test need to
@@ -555,38 +705,29 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
     a_func *funcs = NULL;
     int nfuncs = 0, cap = 0;
 
-    /* Two rounds. The first walks everything reachable by control flow; the
-     * second walks whatever the jump tables reveal, which can only be resolved
-     * once the `jr` sites have been found. Tables discovered in round two are
-     * not chased further -- one level covers the switch statements a compiler
-     * actually emits, and unbounded rounds would need a fixpoint check for
-     * very little gain. */
-    /* Iterate to a fixpoint. Each re-walk can expose cross-function branches that
- * the previous walk order hid, so a fixed two rounds leaves some unpromoted --
- * which shows up as a dispatch miss at run time. The cap is a termination
- * guarantee, not an expected limit: entries only ever accumulate, so this
- * converges in a handful of rounds. */
+    /* Iterate to a fixpoint. Switch tables are resolved inside the walk, as
+     * it reaches each `jr`, so their targets are already blocks of the right
+     * function; what a round adds is cross-function targets (branch, jump or
+     * table targets another walk had already claimed), promoted to entries.
+     * Each re-walk can expose more of those that the previous walk order hid,
+     * so a fixed two rounds leaves some unpromoted -- which shows up as a
+     * dispatch miss at run time. The cap is a termination guarantee, not an
+     * expected limit: entries only ever accumulate, so this converges in a
+     * handful of rounds. When a round stops early, the last walk's results
+     * (functions, unresolved sites, tables) stand as they are. */
     for (int round = 0; round < 8; round++) {
     if (round > 0) {
-        if (!an->image && !cross.n && !indirects.n) break;
-        u32list targets = { 0 };
-        for (int i = 0; i < indirects.n; i++) {
-            int n = resolve_jump_table(an, indirects.v[i], &targets);
-            if (n > 0) { an->ntables++; an->ntable_targets += n; }
-        }
-        for (int i = 0; i < cross.n; i++) u32_push(&targets, cross.v[i]);
-        cross.n = 0;
-        indirects.n = 0;
+        if (!cross.n) break;
         int added = 0;
-        for (int i = 0; i < targets.n; i++) {
-            uint32_t t = targets.v[i];
+        for (int i = 0; i < cross.n; i++) {
+            uint32_t t = cross.v[i];
             if (!a_in_range(an, t)) continue;
             uint32_t ti = word_index(an, t);
             if (entry_map[ti]) continue;
             entry_map[ti] = 1;
             added++;
         }
-        free(targets.v);
+        cross.n = 0;
         if (!added) break;
 
         /* Re-walk everything from a clean slate rather than walking only the
@@ -609,6 +750,9 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
         for (uint32_t i = 0; i < nwords; i++) owner[i] = A_NO_OWNER;
         an->insns = an->vfpu = an->invalid = 0;
         nfuncs = 0;
+        indirects.n = 0;
+        jtables.n = 0;
+        jt_targets.n = 0;
 
         for (uint32_t i = 0; i < nwords; i++)
             if (entry_map[i]) u32_push(&queue, an->base + i * 4);
@@ -643,6 +787,15 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
 
     for (uint32_t i = 0; i < nwords; i++)
         if (seen[i] & SEEN_CODE) an->bytes_reached += 4;
+
+    /* Sorted by site for a_find_jtable. */
+    qsort(jtables.v, (size_t)jtables.n, sizeof *jtables.v, cmp_jtable);
+    an->jtables = jtables.v;
+    an->njtables = jtables.n;
+    an->jt_targets = jt_targets.v;
+    an->njt_targets = jt_targets.n;
+    an->ntables = jtables.n;
+    an->ntable_targets = jt_targets.n;
 
     qsort(funcs, (size_t)nfuncs, sizeof *funcs, cmp_func);
 
@@ -753,9 +906,15 @@ void a_analysis_free(a_analysis *an) {
     free(an->imports);
     free(an->indirects);
     free(an->owner);
+    free(an->jtables);
+    free(an->jt_targets);
     an->funcs = NULL;
     an->imports = NULL;
     an->indirects = NULL;
     an->owner = NULL;
+    an->jtables = NULL;
+    an->jt_targets = NULL;
     an->nfuncs = an->nimports = an->nindirects = 0;
+    an->njtables = an->njt_targets = 0;
+    an->ntables = an->ntable_targets = 0;
 }
