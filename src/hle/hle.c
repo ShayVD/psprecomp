@@ -107,7 +107,7 @@ static psp_hle_trace_fn g_trace;
 void psp_hle_set_trace(psp_hle_trace_fn fn) { g_trace = fn; }
 
 void psp_hle_call(uint32_t nid) {
-    uint32_t args[8] = {0}, ra = psp_cpu.r[PSP_REG_RA];
+    uint32_t args[8], ra = psp_cpu.r[PSP_REG_RA];
     if (g_trace) {
         for (int i = 0; i < 4; i++) args[i] = psp_cpu.r[PSP_REG_A0 + i];
         for (int i = 0; i < 4; i++) args[4 + i] = psp_cpu.r[PSP_REG_T0 + i];
@@ -116,7 +116,7 @@ void psp_hle_call(uint32_t nid) {
         if (g_entry[i].nid == nid) {
             g_fn[i]();
             if (psp_cpu.r[PSP_REG_V0] == 0) note_zero(nid, g_entry[i].name);
-            if (g_trace) g_trace(nid, g_entry[i].name, args, psp_cpu.r[PSP_REG_V0], ra);
+            if (g_trace) g_trace(nid, g_entry[i].name, args, psp_cpu.r[PSP_REG_V0], psp_cpu.r[PSP_REG_V1], ra);
             return;
         }
     }
@@ -132,7 +132,7 @@ void psp_hle_call(uint32_t nid) {
      * soon after, with this line already in the log. */
     fprintf(stderr, "psprecomp: unimplemented firmware call 0x%08X\n", nid);
     psp_ret(0);
-    if (g_trace) g_trace(nid, NULL, args, 0, ra);
+    if (g_trace) g_trace(nid, NULL, args, 0, psp_cpu.r[PSP_REG_V1], ra);
 }
 
 const char *psp_str(uint32_t addr, char *dst, size_t cap) {

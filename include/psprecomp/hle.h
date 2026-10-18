@@ -41,11 +41,14 @@ int psp_hle_is_named(int index);
 void psp_hle_call(uint32_t nid);
 
 /* Optional observer for every firmware call, for oracle traces. `args` are
- * $a0-$a3 and $t0-$t3 as they were on entry; `ret` is $v0 afterwards; `ra`
- * is the caller's return address. `name` is NULL for an unregistered NID.
- * Pass NULL to remove. */
+ * $a0-$a3 then $t0-$t3 (the same as psp_arg(0..7)) as they were on entry;
+ * arguments beyond 8 are not captured. `ret_lo` is $v0 afterwards and `ret_hi`
+ * is $v1 as the handler left it (not zeroed); it is meaningful only for
+ * 64-bit returns. `ra` is the caller's return address. `name` is NULL for an
+ * unregistered NID. Pass NULL to remove. */
 typedef void (*psp_hle_trace_fn)(uint32_t nid, const char *name,
-                                 const uint32_t args[8], uint32_t ret, uint32_t ra);
+                                 const uint32_t args[8], uint32_t ret_lo,
+                                 uint32_t ret_hi, uint32_t ra);
 void psp_hle_set_trace(psp_hle_trace_fn fn);
 
 /* Look up what is registered, for reporting. Returns NULL if absent. */
