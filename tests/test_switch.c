@@ -267,6 +267,83 @@ static void seq_shared(asm_t *as) {
     emit(as, 0);
     emit(as, sll(A0, A0, 2));
 }
+/* Along the branch from the top the key is a constant (-1, so the sltiu
+ * fails and no index gets through); the table stands. */
+static void seq_const_key(asm_t *as) {
+    const uint32_t x = as->pc;
+    emit(as, bne(A1, 0, x, x + 0xC));
+    emit(as, addiu(A0, 0, -1));
+    emit(as, ori(V0, 0, 1));
+    emit(as, sltiu(A2, A0, 3));                     /* x + 0xC */
+    emit(as, beq(A2, 0, as->pc, SEQ_DEFAULT));
+    emit(as, 0);
+    emit(as, sll(A0, A0, 2));
+}
+
+/* A lower bound that lets $a0 = -1 through: index -1 reads before the table. */
+static void seq_negative_lower(asm_t *as) {
+    emit(as, slti(A1, A0, -1));
+    emit(as, bne(A1, 0, as->pc, SEQ_DEFAULT));
+    emit(as, slti(A1, A0, 3));
+    emit(as, beq(A1, 0, as->pc, SEQ_DEFAULT));
+    emit(as, sll(A0, A0, 2));
+}
+
+static void setup(a_analysis *an, uint32_t text_size);
+
+/* Chains of merges. F (at BASE) is the switch: `sltiu a2,a0,3; beq a2,zero,
+ * default; sll ...`. Each G_i is `<slot0>; b <past the previous one's
+ * bound>; nop`, where G_1 branches to F's beq and G_i to G_(i-1)'s `b`, so a
+ * path into the jr can take several edges in a row: G_n -> ... -> G_1 -> F.
+ * Cases at 0x30/0x38/0x40, default at 0x48, G_i at 0x50 + 0xC * (i - 1). */
+static void check_chain(const char *name, int n, uint32_t last_slot0, int want_table) {
+    asm_t as = { BASE };
+    memset(g_w, 0, sizeof g_w);
+    emit(&as, sltiu(A2, A0, 3));
+    emit(&as, beq(A2, 0, as.pc, BASE + 0x48));
+    emit(&as, sll(A0, A0, 2));
+    emit(&as, lui(AT, (TABLE + 0x8000u) >> 16));
+    emit(&as, addu(AT, AT, A0));
+    emit(&as, lw(AT, (int)(int16_t)(TABLE & 0xFFFF), AT));
+    const uint32_t site = as.pc;
+    emit(&as, jr(AT)); emit(&as, 0);
+    as.pc = BASE + 0x30;
+    for (int k = 0; k < 3; k++) { emit(&as, JR_RA); emit(&as, 0); }
+    emit(&as, JR_RA); emit(&as, 0);                 /* default, 0x48 */
+    uint32_t seeds[16] = { BASE };
+    uint32_t into = BASE + 4;
+    for (int i = 1; i <= n; i++) {
+        const uint32_t g = BASE + 0x50 + 0xCu * (uint32_t)(i - 1);
+        as.pc = g;
+        emit(&as, i == n ? last_slot0 : sltiu(A2, A0, 3));
+        emit(&as, beq(0, 0, as.pc, into));
+        emit(&as, 0);
+        seeds[i] = g;
+        into = g + 4;
+    }
+    for (int k = 0; k < 3; k++) g_w[0x100 / 4 + k] = BASE + 0x30 + 8u * (uint32_t)k;
+    store();
+
+    a_analysis an;
+    setup(&an, 0x50 + 0xCu * (uint32_t)n);
+    CHECK(a_discover(&an, seeds, n + 1) == 0, "%s: discover", name);
+    const a_jtable *jt = a_find_jtable(&an, site);
+    if (want_table) {
+        CHECK(jt != NULL && an.nindirects == 0, "%s: table expected (%d unresolved)",
+              name, an.nindirects);
+    } else {
+        CHECK(jt == NULL && an.nindirects == 1, "%s: no table expected (%d tables)",
+              name, an.njtables);
+        /* The table was real, only its bound uncertain: its cases become
+         * entries, so a dispatch from the jr still finds them. */
+        for (int k = 0; k < 3; k++) {
+            const uint32_t t = BASE + 0x30 + 8u * (uint32_t)k;
+            CHECK(an.owner[(t - BASE) / 4] == t, "%s: case 0x%08X is a function", name, t);
+        }
+    }
+    a_analysis_free(&an);
+}
+
 /* Only a lower bound (`bne` on the slti): the table's size is unknown. */
 static void seq_lower_only(asm_t *as) {
     emit(as, slti(A1, A0, 3));
@@ -414,6 +491,7 @@ int main(void) {
     check_seq_at("bias on the bound", seq_bound_bias, A0, TABLE - 4, SNC, 3, 1);
     check_seq_at("lower bound from blez", seq_blez, A0, TABLE - 4, SNC, 3, 1);
     check_seq_at("negative index", seq_negative, A0, TABLE, SNC, 0, 0);
+    check_seq("negative lower bound", seq_negative_lower, A0, 0);
     check_seq_at("gcc-style load", seq_plain, A0, TABLE, GCC, 3, 0);
 
     /* Every way into the code between the bound and the jr must establish
@@ -427,6 +505,14 @@ int main(void) {
     check_seq("merge, stale bound", seq_merge, A0, 0);
     g_slot = sltiu(A2, A0, 7);
     check_seq("merge, different bound", seq_merge, A0, 0);
+
+    /* Paths through several merges are checked as a whole: the bound must
+     * hold however many edges a path takes, up to a depth of 8. */
+    check_chain("two merges, same bound", 2, sltiu(A2, A0, 3), 1);
+    check_chain("two merges, stale $a2", 2, ori(A2, 0, 1), 0);
+    check_chain("eight merges, same bound", 8, sltiu(A2, A0, 3), 1);
+    check_chain("nine merges: too deep to check", 9, sltiu(A2, A0, 3), 0);
+    check_seq("merge, constant key on the edge", seq_const_key, A0, 3);
 
     /* The block another function branches into is promoted to an entry, but
      * only so the emitter can reach it: its one way in is that branch, which

@@ -188,18 +188,23 @@ static int step_back(const a_analysis *an, uint32_t a, a_insn *out) {
 
 /* The code executed before a jr, newest first: step 0 is the instruction
  * before the jr. Normally that is the fall-through path, read backward until
- * the straight line ends. An edge (see check_tables) replaces it from one
- * address on: arriving at `at` by the branch or jump at `from`, the steps
- * before `at` are `from`'s delay slot, `from` itself (taken) and whatever
- * falls through to `from`; arriving at an entry, nothing is known before
- * `at`. All matchers read the code through a path, so the same match can be
- * re-run along every way into it.
+ * the straight line ends. A list of edges (see check_tables) changes it: an
+ * edge says that step `step` (at address `at`; -1 is the jr) was arrived at
+ * by the branch or jump at `from`, so the steps before it are `from`'s delay
+ * slot, `from` itself (taken) and whatever leads to `from` -- possibly
+ * through the next edge; or arrived at as an entry, so nothing is known
+ * before it. All matchers read the code through a path, so the same match
+ * can be re-run along every way into it.
  *
  * Positions on a path are step numbers, not addresses, so "the same
  * instruction" means the same step. */
-enum { JT_EDGE_NONE, JT_EDGE_BRANCH, JT_EDGE_ENTRY };
+enum { JT_EDGE_BRANCH, JT_EDGE_ENTRY };
 
-typedef struct { int kind; uint32_t at, from; } jt_edge;
+typedef struct { int kind; uint32_t at, from; int step; } jt_edge;
+
+/* The most edges one path is checked through (see check_tables). In this
+ * game 8 is the depth every table's paths fit in; 4 rejected six of them. */
+#define JT_EDGE_DEPTH 8
 
 typedef struct {
     const a_analysis *an;
@@ -208,34 +213,46 @@ typedef struct {
     uint8_t  taken[JT_PATH];    /* 1: a branch this path takes */
     int      n;                 /* steps known; the path ends after them */
     int      deepest;           /* highest step a matcher asked for */
+    /* Where the last edge's code starts (its delay slot's step), or -1 when
+     * the path has no edges; JT_PATH when the last edge ended the path or
+     * was never reached. */
+    int      edge_from;
 } jt_path;
 
-static void build_path(const a_analysis *an, uint32_t site, const jt_edge *e, jt_path *p) {
+static void push_step(jt_path *p, uint32_t a, int on, int taken) {
+    p->addr[p->n] = a; p->on[p->n] = (uint8_t)on; p->taken[p->n] = (uint8_t)taken; p->n++;
+}
+
+static void build_path(const a_analysis *an, uint32_t site, const jt_edge *edges, int nedges,
+                       jt_path *p) {
     p->an = an;
     p->n = 0;
     p->deepest = -1;
-    int edge = e && e->kind != JT_EDGE_NONE;
+    p->edge_from = nedges ? JT_PATH : -1;
+    int ei = 0;                                 /* the next edge to apply */
     uint32_t cur = site;
     while (p->n < JT_PATH) {
         a_insn in;
-        if (edge && cur == e->at) {
-            edge = 0;                           /* once: a loop may come back */
+        const jt_edge *e = ei < nedges ? &edges[ei] : NULL;
+        if (e && p->n - 1 == e->step) {
+            ei++;
             if (e->kind == JT_EDGE_ENTRY) return;
             const uint32_t slot = e->from + 4;
             if (!a_in_range(an, slot) || !a_in_range(an, e->from)) return;
             a_decode(fetch(an, slot), slot, &in);
             if (ends_straight_line(&in)) return;
-            p->addr[p->n] = slot; p->on[p->n] = 1; p->taken[p->n] = 0; p->n++;
+            if (ei == nedges) p->edge_from = p->n;
+            push_step(p, slot, 1, 0);
             if (p->n == JT_PATH) return;
             a_decode(fetch(an, e->from), e->from, &in);
             if (in.is_call) return;             /* `at` was called, not jumped to */
-            p->addr[p->n] = e->from; p->on[p->n] = 1; p->taken[p->n] = 1; p->n++;
+            push_step(p, e->from, 1, 1);
             cur = e->from;
             continue;
         }
         const uint32_t a = cur - 4;
         int st;
-        if (edge && a == e->at) {
+        if (e && p->n == e->step) {
             /* Arrived here by the edge, so it runs whatever precedes it. */
             if (!a_in_range(an, a)) return;
             a_decode(fetch(an, a), a, &in);
@@ -244,7 +261,7 @@ static void build_path(const a_analysis *an, uint32_t site, const jt_edge *e, jt
             st = step_back(an, a, &in);
         }
         if (st == STEP_STOP) return;
-        p->addr[p->n] = a; p->on[p->n] = st == STEP_ON; p->taken[p->n] = 0; p->n++;
+        push_step(p, a, st == STEP_ON, 0);
         cur = a;
     }
 }
@@ -310,10 +327,14 @@ static int compare_test(jt_path *p, int at, int end, int t) {
  * `root_at`. `root_at` is the step that computed it, or the step where the
  * walk ended without finding one (the path's end, or past `floor`): the value
  * was live there. Two walks along the same path with the same floor end at
- * the same step, so equal roots mean equal values. Returns 0 when the copies
- * and offsets lead back to $zero (`addiu $a0, $zero, 5`, `or $a0, $zero,
- * $zero`): a constant, which is not a key. Other constants (`ori $a0,
- * $zero, 5`, `lui`) are roots like any computed value. */
+ * the same step, so equal roots mean equal values. When the copies and
+ * offsets lead back to $zero (`addiu $a0, $zero, -1`) the root is $zero,
+ * at JT_ROOT_ZERO, the same for every walk: the value is the constant delta.
+ * The matchers still treat a root as unknown, which is less precise for a
+ * constant but never wrong. Other constants (`ori $a0, $zero, 5`, `lui`)
+ * are roots like any computed value. Always returns 1. */
+#define JT_ROOT_ZERO (JT_PATH + 1)
+
 static int value_root(jt_path *p, int from, int floor, int reg,
                       int *root_at, int *root_reg, int64_t *delta) {
     int64_t d = 0;
@@ -327,7 +348,7 @@ static int value_root(jt_path *p, int from, int floor, int reg,
         else if ((in.op == A_OR || in.op == A_ADDU) && (in.rs == 0 || in.rt == 0))
             reg = in.rs ? in.rs : in.rt;
         else break;                             /* computed here */
-        if (!reg) return 0;
+        if (!reg) { k = JT_ROOT_ZERO; break; }
     }
     *root_at = k; *root_reg = reg; *delta = d;
     return 1;
@@ -376,9 +397,12 @@ static int switch_bound(jt_path *p, int sll_k, int key, int64_t *lo_out, int64_t
         if (s < 0) break;
         if (!s) continue;
         int bat, breg; int64_t bd;
-        if ((in.op == A_SLTIU || in.op == A_SLTI) && in.imm > 0) {
+        if (in.op == A_SLTIU || in.op == A_SLTI) {
             const int test = compare_test(p, k, sll_k, in.rt);
-            if (!test) continue;
+            /* An upper bound needs a positive constant (and sltiu's operand
+             * is only known to be >= 0 when it bounds from above); a signed
+             * lower bound may be any constant. */
+            if (!test || (test > 0 && in.imm <= 0) || (test < 0 && in.op != A_SLTI)) continue;
             if (!value_root(p, k, floor, in.rs, &bat, &breg, &bd) || bat != kat || breg != kreg)
                 continue;
             /* key = root + kd, compared = root + bd, so key = compared - bd + kd. */
@@ -387,7 +411,7 @@ static int switch_bound(jt_path *p, int sll_k, int key, int64_t *lo_out, int64_t
                 if (!have_hi || at < hi) hi = at;
                 have_hi = 1;
                 if (in.op == A_SLTIU && (!have_lo || kd - bd > lo)) { lo = kd - bd; have_lo = 1; }
-            } else if (in.op == A_SLTI) {
+            } else {
                 if (!have_lo || at > lo) lo = at;
                 have_lo = 1;
             }
@@ -477,7 +501,7 @@ static int match_table(jt_path *p, uint32_t site, a_jtable *jt) {
 static int resolve_jump_table(const a_analysis *an, uint32_t site, u32list *out, a_jtable *jt) {
     if (!an->image) return 0;
     jt_path p;
-    build_path(an, site, NULL, &p);
+    build_path(an, site, NULL, 0, &p);
     if (!match_table(&p, site, jt) || jt->count < 2) return 0;
 
     const int start = out->n;
@@ -825,44 +849,98 @@ static int cmp_edge(const void *a, const void *b) {
     return (x > y) - (x < y);
 }
 
-/* Does the match along edge `e` into the jr at `site` stay inside the
- * table `ref`: the same table, indexes a subset of ref's (often the same
- * bound recomputed, sometimes a tighter one), or none at all (the edge's
- * own tests rule every index out)? */
-static int same_match(const a_analysis *an, uint32_t site, const jt_edge *e, const a_jtable *ref) {
+/* Is the match `r` inside the table `ref`: the same table and a subset of
+ * its indexes (often the same bound recomputed, sometimes a tighter one),
+ * or no index at all (the path's own tests rule every index out)? */
+static int within(const a_jtable *r, const a_jtable *ref) {
+    if (r->count == 0) return 1;
+    return r->table - 4u * r->lo == ref->table - 4u * ref->lo &&
+           r->lo >= ref->lo && r->lo + r->count <= ref->lo + ref->count;
+}
+
+typedef struct {
+    const a_analysis *an;
+    const uint8_t    *entry_map;
+    const edgelist   *edges;            /* sorted by target */
+} jt_check;
+
+static int edge_in_chain(const jt_edge *chain, int n, const jt_edge *e) {
+    for (int i = 0; i < n; i++)
+        if (chain[i].kind == e->kind && chain[i].at == e->at && chain[i].from == e->from)
+            return 1;
+    return 0;
+}
+
+/* Check the paths into the jr at `site` that take the edges `chain` (the
+ * first nearest the jr) and then any further edges: does every match stay
+ * within `ref`? A further edge can land on any step the match read from the
+ * last edge's code on (an edge into step k changes step k + 1). Each is
+ * followed in turn, up to JT_EDGE_DEPTH edges in all; a path needing more,
+ * or one the match fails on, fails the check. An edge already on the chain
+ * is not taken again: the path would run through the same loop twice. */
+static int check_paths(const jt_check *ck, uint32_t site, const a_jtable *ref,
+                       jt_edge *chain, int nchain) {
+    const a_analysis *an = ck->an;
     jt_path p;
     a_jtable r;
-    build_path(an, site, e, &p);
+    build_path(an, site, chain, nchain, &p);
     if (!match_table(&p, site, &r)) return 0;
-    if (r.count == 0) return 1;
-    return r.table - 4u * r.lo == ref->table - 4u * ref->lo &&
-           r.lo >= ref->lo && r.lo + r.count <= ref->lo + ref->count;
+    if (nchain && !within(&r, ref)) return 0;
+    if (p.edge_from >= JT_PATH) return 1;       /* nothing past the last edge */
+
+    /* The match read steps 0..deepest (or ran off the path's end). */
+    const int last = p.deepest < p.n ? p.deepest : p.n;
+    for (int k = p.edge_from; k < last; k++) {
+        const uint32_t at = k < 0 ? site : p.addr[k];
+        jt_edge own = { JT_EDGE_ENTRY, at, 0, k };
+        /* Entering at the step where the path ends anyway changes nothing. */
+        const int is_entry = ck->entry_map[word_index(an, at)] == ENTRY_OWN &&
+                             !(k == p.n - 1 && p.n < JT_PATH);
+        int lo = 0, hi = ck->edges->n;          /* first edge landing at `at` */
+        while (lo < hi) {
+            const int mid = lo + (hi - lo) / 2;
+            if (ck->edges->v[mid].at < at) lo = mid + 1; else hi = mid;
+        }
+        for (int m = lo - (is_entry ? 1 : 0); m < ck->edges->n; m++) {
+            jt_edge e;
+            if (m < lo) e = own;                /* the entry, first */
+            else if (ck->edges->v[m].at == at) { e = ck->edges->v[m]; e.step = k; }
+            else break;
+            if (edge_in_chain(chain, nchain, &e)) continue;
+            if (nchain == JT_EDGE_DEPTH) return 0;      /* too deep to check */
+            chain[nchain] = e;
+            if (!check_paths(ck, site, ref, chain, nchain + 1)) return 0;
+        }
+    }
+    return 1;
 }
 
 /* A table is matched along the fall-through path into its jr, but code on
  * that path can also be reached part-way: by a branch or jump landing there,
- * as a case of another table, or as a function entry. Each of those is
- * another path into the jr, and the bound only holds if the match along it
- * comes out the same -- a merged tail whose incoming branch carries a stale
- * or different $t would let other indexes through. (In this game the edges
- * that land there recompute the identical compare, in their delay slot or a
- * few instructions earlier.)
+ * as a case of another table, or as a function entry. Each of those starts
+ * another path into the jr, and the bound only holds if the match along
+ * every path stays within the table -- a merged tail whose incoming branch
+ * carries a stale or different $t would let other indexes through. (In this
+ * game the edges that land there recompute the identical compare, in their
+ * delay slot or a few instructions earlier.)
  *
  * So after each walk, when every edge out of reached code is known, each
- * table is matched again along every edge landing where its match looked:
- * on the jr, or on a step whose predecessor the match read. A result that
- * fails or lets an index outside the table through rejects it (see
- * same_match). An entry counts as an edge from unknown code only when it is
- * one in its own right; an address promoted from a cross-function branch
- * is an entry only for the emitter's sake, and its branches are edges here
- * already. Each edge is checked with the rest of
- * its path falling through; a path taking two such edges is not checked as
- * a whole.
+ * table is matched again along every path made of up to JT_EDGE_DEPTH edges
+ * from reached code (check_paths). What is guaranteed: for every path into
+ * the jr that enters the code the match reads through at most JT_EDGE_DEPTH
+ * such edges (without repeating one), the match succeeds and its reachable
+ * indexes are within the table's; otherwise the table is rejected,
+ * including when a path would need more edges. Code that is not reached by
+ * discovery contributes no edges. An entry counts as an edge from unknown
+ * code only when it is one in its own right; an address promoted from a
+ * cross-function branch is an entry only for the emitter's sake, and its
+ * branches are edges here already.
  *
- * Rejected sites are marked in `no_table`; returns how many were rejected.
- * The caller re-walks, so the rejected tables' targets are no longer walked
- * as blocks of the switch's function and their jrs become unresolved. */
-static int check_tables(const a_analysis *an, const uint8_t *seen, const uint8_t *entry_map,
+ * Rejected sites are marked in `no_table`, and their reachable targets are
+ * made entries: the table is real, only its bound is uncertain, so the jr's
+ * dispatch must still find them. Returns how many tables were rejected; the
+ * caller re-walks, so their jrs become unresolved. */
+static int check_tables(const a_analysis *an, const uint8_t *seen, uint8_t *entry_map,
                         const jtlist *jts, const u32list *jtt, uint8_t *no_table) {
     edgelist el = { 0 };
     int ok_mem = 1;
@@ -874,44 +952,32 @@ static int check_tables(const a_analysis *an, const uint8_t *seen, const uint8_t
         a_decode(fetch(an, a), a, &in);
         if (!in.has_target || in.is_indirect || !(in.is_branch || in.is_jump)) continue;
         if (!a_in_range(an, in.target)) continue;
-        jt_edge e = { in.is_call ? JT_EDGE_ENTRY : JT_EDGE_BRANCH, in.target, a };
+        jt_edge e = { in.is_call ? JT_EDGE_ENTRY : JT_EDGE_BRANCH, in.target, a, 0 };
         ok_mem = edge_push(&el, e) == 0;
     }
     for (int j = 0; ok_mem && j < jts->n; j++)
         for (uint32_t k = 0; ok_mem && k < jts->v[j].count; k++) {
-            jt_edge e = { JT_EDGE_BRANCH, jtt->v[jts->v[j].first + k], jts->v[j].site };
+            jt_edge e = { JT_EDGE_BRANCH, jtt->v[jts->v[j].first + k], jts->v[j].site, 0 };
             ok_mem = edge_push(&el, e) == 0;
         }
     qsort(el.v, (size_t)el.n, sizeof *el.v, cmp_edge);
 
+    const jt_check ck = { an, entry_map, &el };
     int rejected = 0;
     for (int j = 0; j < jts->n; j++) {
         const a_jtable *t = &jts->v[j];
         jt_path p;
-        build_path(an, t->site, NULL, &p);
         a_jtable ref;
-        int ok = ok_mem && match_table(&p, t->site, &ref);
-        /* The match read steps 0..deepest (or ran off the path's end): an
-         * edge into the jr or into step k < that changes step k + 1. */
-        const int last = p.deepest < p.n ? p.deepest : p.n;
-        for (int k = -1; ok && k < last; k++) {
-            const uint32_t at = k < 0 ? t->site : p.addr[k];
-            if (entry_map[word_index(an, at)] == ENTRY_OWN) {
-                jt_edge e = { JT_EDGE_ENTRY, at, 0 };
-                ok = same_match(an, t->site, &e, &ref);
-            }
-            int lo = 0, hi = el.n;              /* first edge landing at `at` */
-            while (lo < hi) {
-                const int mid = lo + (hi - lo) / 2;
-                if (el.v[mid].at < at) lo = mid + 1; else hi = mid;
-            }
-            for (int m = lo; ok && m < el.n && el.v[m].at == at; m++)
-                ok = same_match(an, t->site, &el.v[m], &ref);
+        jt_edge chain[JT_EDGE_DEPTH];
+        build_path(an, t->site, NULL, 0, &p);
+        if (ok_mem && match_table(&p, t->site, &ref) && check_paths(&ck, t->site, &ref, chain, 0))
+            continue;
+        no_table[word_index(an, t->site)] = 1;
+        for (uint32_t k = 0; k < t->count; k++) {
+            const uint32_t ti = word_index(an, jtt->v[t->first + k]);
+            if (!entry_map[ti]) entry_map[ti] = ENTRY_OWN;
         }
-        if (!ok) {
-            no_table[word_index(an, t->site)] = 1;
-            rejected++;
-        }
+        rejected++;
     }
     free(el.v);
     return rejected;
