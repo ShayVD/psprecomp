@@ -465,13 +465,18 @@ static int seed_in_code(const elf_info *e, uint32_t p) {
     return p >= e->text_addr && p < e->text_addr + e->text_size;
 }
 
+static int cmp_u32(const void *x, const void *y) {
+    uint32_t a = *(const uint32_t *)x, b = *(const uint32_t *)y;
+    return a < b ? -1 : a > b;
+}
+
 /* Where discovery's seeds came from, for the `funcs` report. */
 typedef struct {
     int nseeds;      /* total */
     int nexports;
     int nptr;        /* relocations, or scanned data pointers */
     int scanned;     /* nptr came from the heuristic data scan */
-    int npair;       /* lui/addiu and lui/ori address pairs in code */
+    int npair;       /* distinct targets of lui/addiu and lui/ori pairs in code */
 } seed_stats;
 
 /* Load a decrypted module and run discovery over it. On success the caller
@@ -591,13 +596,27 @@ static int load_and_discover(const char *path, psp_blob *b, elf_info *e,
     int npair = a_scan_address_pairs(an, NULL, 0);
     if (npair > 0) {
         uint32_t *bigger = (uint32_t *)realloc(seeds, (size_t)(nseeds + npair) * sizeof *seeds);
-        if (!bigger) { free(seeds); psp_blob_free(b); return -1; }
+        if (!bigger) {
+            fprintf(stderr, "discovery failed (out of memory)\n");
+            free(seeds);
+            psp_blob_free(b);
+            return -1;
+        }
         seeds = bigger;
-        npair = a_scan_address_pairs(an, seeds + nseeds, npair);
+        int avail = npair;
+        npair = a_scan_address_pairs(an, seeds + nseeds, avail);
+        if (npair > avail) npair = avail;
         int kept = 0;
         for (int i = 0; i < npair; i++)
             if (seed_in_code(e, seeds[nseeds + i])) seeds[nseeds + kept++] = seeds[nseeds + i];
-        npair = kept;
+        /* The same address is often built in several places; report distinct
+         * targets. Sort the appended range and drop repeats. */
+        qsort(seeds + nseeds, (size_t)kept, sizeof *seeds, cmp_u32);
+        int uniq = 0;
+        for (int i = 0; i < kept; i++)
+            if (i == 0 || seeds[nseeds + i] != seeds[nseeds + i - 1])
+                seeds[nseeds + uniq++] = seeds[nseeds + i];
+        npair = uniq;
         nseeds += npair;
     }
 

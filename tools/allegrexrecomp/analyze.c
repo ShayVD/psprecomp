@@ -55,7 +55,13 @@ static uint32_t fetch(const a_analysis *an, uint32_t addr) {
 /* The general-purpose register an instruction writes, or -1 if it writes
  * none. Used by the matchers below to ask "was this register set again in
  * between?", so it must not miss a writer; every GPR-writing op the decoder
- * names is listed. */
+ * names is listed.
+ *
+ * It is deliberately conservative. MOVZ/MOVN write only when their condition
+ * holds and LWL/LWR replace only part of the register, but a matcher cannot
+ * know which, so they count as writers. JAL and the *AL branches report only
+ * $ra, although the callee also clobbers every caller-saved register: a
+ * matcher that tracks a register across a call must account for that itself. */
 static int gpr_written(const a_insn *in) {
     switch (in->op) {
     case A_SLL: case A_SRL: case A_SRA: case A_SLLV: case A_SRLV: case A_SRAV:
@@ -695,13 +701,23 @@ int a_scan_address_pairs(const a_analysis *an, uint32_t *out, int max) {
         a_decode(fetch(an, a), a, &hi);
         if (hi.op != A_LUI || hi.rt == 0) continue;
 
+        /* A lui in the delay slot of an unconditional jump feeds the jump's
+         * target, not the code that follows it in memory. (A call's delay
+         * slot does fall through, so calls are not skipped.) */
+        if (off >= 4) {
+            a_insn prev;
+            a_decode(fetch(an, a - 4), a - 4, &prev);
+            if (prev.is_jump && !prev.is_call) continue;
+        }
+
         int stop_after = -1;          /* instructions left before control leaves */
         for (int i = 1; i <= PAIR_WINDOW && stop_after != 0; i++) {
             const uint32_t b = a + (uint32_t)i * 4;
-            if (!a_in_range(an, b)) break;
+            if (b - sbase >= ssize || !a_in_range(an, b)) break;
             if (stop_after > 0) stop_after--;
             a_insn lo;
             a_decode(fetch(an, b), b, &lo);
+            if (lo.op == A_INVALID) break;               /* data, not code */
 
             if ((lo.op == A_ADDIU || lo.op == A_ORI) && lo.rs == hi.rt) {
                 /* addiu's immediate is sign-extended and ori's zero-extended;
@@ -720,10 +736,12 @@ int a_scan_address_pairs(const a_analysis *an, uint32_t *out, int max) {
                 continue;
             }
             if (gpr_written(&lo) == hi.rt) break;            /* high half gone */
-            /* An unconditional transfer ends the straight line after its
-             * delay slot; a pair does not span into unrelated code. */
-            if ((lo.is_jump && !lo.is_call) || lo.is_return ||
-                (lo.is_indirect && !lo.is_call))
+            /* An unconditional jump (j, jr) ends the straight line after its
+             * delay slot; a pair does not span into unrelated code. A call
+             * returns, so it does not. `b` (beq $zero,$zero) is a branch, not
+             * a jump: it is local flow, and a lui before an if/else dominates
+             * both arms, so it is deliberately not a stop. */
+            if (lo.is_jump && !lo.is_call)
                 stop_after = 1;
         }
     }
