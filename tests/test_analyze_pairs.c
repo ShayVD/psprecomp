@@ -24,6 +24,9 @@ static uint32_t ori(int rt, int rs, uint32_t imm) {
 static uint32_t lw(int rt, int imm, int base) {
     return 0x8C000000u | (uint32_t)base << 21 | (uint32_t)rt << 16 | ((uint32_t)imm & 0xFFFF);
 }
+static uint32_t addu(int rd, int rs, int rt) {
+    return (uint32_t)rs << 21 | (uint32_t)rt << 16 | (uint32_t)rd << 11 | 0x21u;
+}
 static uint32_t j(uint32_t target)   { return 0x08000000u | ((target >> 2) & 0x03FFFFFFu); }
 static uint32_t jal(uint32_t target) { return 0x0C000000u | ((target >> 2) & 0x03FFFFFFu); }
 static uint32_t beq_zero(int words)  { return 0x10000000u | ((uint32_t)words & 0xFFFF); }  /* b */
@@ -96,7 +99,7 @@ static void test_basic_and_discovery(void) {
     w[i++] = lui(T0, F2 >> 16);
     w[i++] = ori(A1, T0, F2 & 0xFFFF);   /* -> F2 (rt != rs) */
     w[i++] = lui(A0, BASE >> 16);
-    w[i++] = lw(A0, 0, A0);              /* clobbers $a0: not a pair */
+    w[i++] = lw(A0, 0, A0);              /* clobbers $a0 (see test_register_tracking) */
     w[i++] = addiu(A1, A0, 0x4040);
     w[i++] = lui(A0, HI(DATA));
     w[i++] = addiu(A0, A0, LO(DATA));    /* -> DATA: outside the scan range */
@@ -180,6 +183,13 @@ static void test_register_tracking(void) {
      * register sees the new value, not the lui. */
     uint32_t replaced[] = { lui(A0, HI(T(1))), addiu(A0, A0, LO(T(1))), addiu(A1, A0, LO(T(2))) };
     expect("low half replaces the high half", replaced, 3, NULL, &(uint32_t){ T(1) }, 1);
+
+    /* Any write to the register between lui and low half voids the pair. The
+     * would-be target is in range, so only the clobber check rejects these. */
+    uint32_t by_load[] = { lui(A0, HI(T(1))), lw(A0, 0, A0), addiu(A1, A0, LO(T(1))) };
+    expect("clobbered by a load", by_load, 3, NULL, NULL, 0);
+    uint32_t by_alu[] = { lui(A0, HI(T(2))), addu(A0, A1, 6), addiu(A1, A0, LO(T(2))) };
+    expect("clobbered by an ALU op", by_alu, 3, NULL, NULL, 0);
 
     /* (c) a lui into a register that the low half does not overwrite can feed
      * several low halves. */
