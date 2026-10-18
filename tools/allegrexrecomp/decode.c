@@ -263,6 +263,17 @@ static const char *const FREG_NAMES[32] = {
 const char *a_reg_name(unsigned idx)  { return REG_NAMES[idx & 31]; }
 const char *a_freg_name(unsigned idx) { return FREG_NAMES[idx & 31]; }
 
+int a_always_taken(const a_insn *in) {
+    switch (in->op) {
+    case A_BEQ: case A_BEQL:
+        return in->rs == in->rt;
+    case A_BGEZ: case A_BGEZL: case A_BLEZ: case A_BLEZL:
+        return in->rs == 0;
+    default:
+        return 0;
+    }
+}
+
 const char *a_mnemonic(a_op op) {
     if (op <= A_INVALID || op >= A_OP_COUNT || !OPINFO[op].name) return "?";
     return OPINFO[op].name;

@@ -684,7 +684,8 @@ static void emit_function(ectx *c, const a_func *fn) {
 
         if (c->is_label[i]) fprintf(f, "L_%08X: PSP_MARK(0x%08Xu);\n", a, a);
         last_terminal = in.is_return || in.is_indirect ||
-                        (in.is_jump && !in.is_call);
+                        (in.is_jump && !in.is_call) ||
+                        (a_always_taken(&in) && !in.is_call);
         comment(c, &in);
 
         /* The delay-slot instruction, if this transfers control. */
@@ -742,7 +743,9 @@ static void emit_function(ectx *c, const a_func *fn) {
                     fprintf(f, " return; } }\n");
                 }
             }
-            if (slot_alias) emit_slot_alias(c, a, &slot, 1);
+            /* The standalone copy of the slot carries on to a + 8, even after
+             * an always-taken branch. */
+            if (slot_alias) { emit_slot_alias(c, a, &slot, 1); last_terminal = 0; }
             a += 4;                              /* consumed the delay slot */
             continue;
         }
@@ -864,6 +867,12 @@ static void emit_function(ectx *c, const a_func *fn) {
         if (is_function(an, next)) {
             fprintf(f, "    /* falls through into the next function */\n");
             fprintf(f, "    psp_func_%08X();\n", next);
+        } else {
+            /* Into code that is no function: say so at run time rather than
+             * returning as if this body had finished. */
+            fprintf(f, "    /* falls into 0x%08X */\n", next);
+            emit_static_call(c, next);
+            fprintf(f, "    return;\n");
         }
     }
     fprintf(f, "}\n");

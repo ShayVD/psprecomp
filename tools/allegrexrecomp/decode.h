@@ -148,6 +148,12 @@ typedef struct {
  * 0 otherwise — so a caller can count decode coverage over a whole image. */
 int a_decode(uint32_t word, uint32_t addr, a_insn *out);
 
+/* Is this a branch whose condition always holds -- `b` (beq $x, $x),
+ * `bgez $zero`, `blez $zero`, or their likely forms? Such a branch has no
+ * not-taken path: the instruction after its delay slot is not reached from
+ * it. (`bal`, bgezal $zero, is a call and returns, so it is not one.) */
+int a_always_taken(const a_insn *in);
+
 /* Canonical mnemonic, e.g. "addiu". Never NULL. */
 const char *a_mnemonic(a_op op);
 

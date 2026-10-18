@@ -146,17 +146,8 @@ static uint32_t image_read32(const a_analysis *an, uint32_t addr) {
  * Walking backward across one would pair the idiom with values that do not
  * reach the jr. */
 static int ends_straight_line(const a_insn *in) {
-    if (in->is_call || in->is_jump) return 1;
-    switch (in->op) {
-    case A_BREAK: case A_ERET:
-        return 1;
-    case A_BEQ: case A_BEQL:
-        return in->rs == in->rt;
-    case A_BGEZ: case A_BGEZL: case A_BLEZ: case A_BLEZL:
-        return in->rs == 0;
-    default:
-        return 0;
-    }
+    if (in->is_call || in->is_jump || a_always_taken(in)) return 1;
+    return in->op == A_BREAK || in->op == A_ERET;
 }
 
 /* One step of a backward walk along the fall-through path: decode `a` into
@@ -603,10 +594,31 @@ static int trace_function(walk_ctx *c, uint32_t entry, a_func *out) {
      * once globally. */
     while (blocks.n) {
         uint32_t a = blocks.v[--blocks.n];
+        int first = 1;                              /* at the block's start */
 
         while (a_in_range(an, a)) {
             uint32_t idx = word_index(an, a);
-            if (c->seen[idx] & SEEN_CODE) break;    /* already walked */
+            if (c->seen[idx] & SEEN_CODE) {         /* already walked */
+                /* By another function, and not an entry: this one runs on into
+                 * that function's code (falling past a branch or a call whose
+                 * delay slot is that function's entry, say). The emitter can
+                 * only continue there through an entry, so it is promoted,
+                 * exactly like a branch into another function's block. */
+                if (c->owner[idx] != c->cur_owner && !c->entry_map[idx]) {
+                    u32_push(c->cross, a);
+                } else if (first && c->owner[idx] == c->cur_owner && a_in_range(an, a - 4)) {
+                    /* A branch into one of this function's delay slots, walked
+                     * with its transfer. Arriving by the branch, the slot runs
+                     * as an ordinary instruction and execution carries on after
+                     * it -- which nothing else may reach (after a `b` or a
+                     * `j`, say). */
+                    a_insn prev;
+                    a_decode(fetch(an, a - 4), a - 4, &prev);
+                    if (prev.has_delay_slot) { first = 0; a += 4; continue; }
+                }
+                break;
+            }
+            first = 0;
 
             /* Arriving at a different function's entry means we walked off the
              * end of this one — a tail call, or a function that ends without a
@@ -639,7 +651,11 @@ static int trace_function(walk_ctx *c, uint32_t entry, a_func *out) {
                 uint32_t d = a + 4;
                 if (a_in_range(an, d)) {
                     uint32_t didx = word_index(an, d);
-                    if (!(c->seen[didx] & SEEN_CODE)) {
+                    /* A slot that is another function's entry is left for that
+                     * function's walk: claimed here, it would be seen already
+                     * when that walk starts, which then finds nothing. The
+                     * emitter runs a slot with its transfer whoever owns it. */
+                    if (!(c->seen[didx] & SEEN_CODE) && !(d != entry && is_known_entry(c, d))) {
                         a_insn din;
                         a_decode(fetch(an, d), d, &din);
                         c->seen[didx] |= SEEN_CODE;
@@ -740,6 +756,11 @@ static int trace_function(walk_ctx *c, uint32_t entry, a_func *out) {
                         u32_push(&blocks, in.target);
                     }
                 }
+                /* An always-taken branch (`b`) has no not-taken path: what
+                 * follows its delay slot is only reached through its own
+                 * labels, and walking on into it would claim it for this
+                 * function -- the case blocks of a switch, typically. */
+                if (a_always_taken(&in) && !in.is_call) break;
                 a += 8;
                 continue;
             }

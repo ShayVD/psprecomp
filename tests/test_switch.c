@@ -552,7 +552,13 @@ static void build_back(void) {
 
 /* `transfer` at BASE, its delay slot at BASE + 4 is also the entry of a
  * second function. The first function's body must still run the slot. */
-static void check_foreign_slot(const char *name, uint32_t transfer) {
+static void check_foreign_slot_order(const char *name, uint32_t transfer, int falls_on,
+                                     int slot_first);
+static void check_foreign_slot(const char *name, uint32_t transfer, int falls_on) {
+    check_foreign_slot_order(name, transfer, falls_on, 1);
+}
+static void check_foreign_slot_order(const char *name, uint32_t transfer, int falls_on,
+                                     int slot_first) {
     a_analysis an;
     memset(g_w, 0, sizeof g_w);
     g_w[0x00 / 4] = transfer;
@@ -560,7 +566,8 @@ static void check_foreign_slot(const char *name, uint32_t transfer) {
     g_w[0x08 / 4] = JR_RA; g_w[0x0C / 4] = 0;
     g_w[0x10 / 4] = JR_RA; g_w[0x14 / 4] = ori(V0, 0, 7);
     store();
-    uint32_t seeds[2] = { BASE, BASE + 4 };
+    /* The queue walks the last seed first. */
+    uint32_t seeds[2] = { slot_first ? BASE : BASE + 4, slot_first ? BASE + 4 : BASE };
     setup(&an, 0x18);
     CHECK(a_discover(&an, seeds, 2) == 0, "%s: discover", name);
     CHECK(an.nfuncs >= 2 && an.owner[1] != BASE, "%s: slot owned by another function", name);
@@ -571,6 +578,38 @@ static void check_foreign_slot(const char *name, uint32_t transfer) {
     const char *end = body ? strstr(body, "static void psp_body_08804004") : NULL;
     const char *slot = body ? strstr(body, "/* 08804004") : NULL;
     CHECK(slot != NULL && (end == NULL || slot < end), "%s: slot runs inline in the first body", name);
+    /* The path past the transfer (not taken, or the call's return) runs on
+     * at BASE + 8, which the slot's function owns: it is an entry, called. */
+    if (body) {
+        char first[4096];
+        const size_t n = end ? (size_t)(end - body) : strlen(body);
+        snprintf(first, sizeof first, "%.*s", (int)(n < sizeof first ? n : sizeof first - 1), body);
+        CHECK(strstr(first, "not discovered") == NULL, "%s: nothing undiscovered", name);
+        if (falls_on)
+            CHECK(strstr(first, "psp_func_08804008()") != NULL, "%s: BASE + 8 is called", name);
+    }
+    a_analysis_free(&an);
+}
+
+/* An always-taken branch at BASE (to 0x18) has no fall-through: the code at
+ * 0x08 is only reachable through its own labels, so it is not walked and
+ * the body does not run into it. */
+static void check_always(const char *name, const char *prefix, uint32_t br) {
+    a_analysis an;
+    memset(g_w, 0, sizeof g_w);
+    g_w[0x00 / 4] = br;
+    g_w[0x08 / 4] = ori(V0, 0, 1); g_w[0x0C / 4] = JR_RA;
+    g_w[0x18 / 4] = JR_RA; g_w[0x1C / 4] = ori(V0, 0, 2);
+    store();
+    uint32_t seed = BASE;
+    setup(&an, 0x20);
+    CHECK(a_discover(&an, &seed, 1) == 0, "%s: discover", name);
+    CHECK(an.owner[0x08 / 4] == A_NO_OWNER, "%s: code after it not walked", name);
+    CHECK(an.owner[0x18 / 4] == BASE, "%s: target walked", name);
+    const char *src = emit_source(&an, prefix);
+    CHECK(strstr(src, "falls into") == NULL && strstr(src, "not discovered") == NULL,
+          "%s: no fall-through emitted", name);
+    CHECK(strstr(src, "goto L_08804018;") != NULL, "%s: branch is a goto", name);
     a_analysis_free(&an);
 }
 
@@ -700,12 +739,68 @@ int main(void) {
 
     /* A delay slot that is another function's entry still runs with its
      * transfer, whatever the kind. */
-    check_foreign_slot("branch", beq(A0, 0, BASE, BASE + 0x10));
-    check_foreign_slot("likely branch", beql(A0, 0, BASE, BASE + 0x10));
-    check_foreign_slot("jal", jal(BASE + 0x10));
-    check_foreign_slot("j", j_(BASE + 0x10));
-    check_foreign_slot("jr $ra", JR_RA);
-    check_foreign_slot("jr", jr(A0));
+    check_foreign_slot("branch", beq(A0, 0, BASE, BASE + 0x10), 1);
+    check_foreign_slot("likely branch", beql(A0, 0, BASE, BASE + 0x10), 1);
+    check_foreign_slot("jal", jal(BASE + 0x10), 1);
+    check_foreign_slot("j", j_(BASE + 0x10), 0);
+    check_foreign_slot("jr $ra", JR_RA, 0);
+    check_foreign_slot("jr", jr(A0), 0);
+
+    /* Whichever is walked first, the slot stays its own function's: the
+     * branch's walk does not claim a delay slot that is an entry. */
+    check_foreign_slot_order("branch, branch walked first", beq(A0, 0, BASE, BASE + 0x10), 1, 0);
+    check_foreign_slot_order("jal, jal walked first", jal(BASE + 0x10), 1, 0);
+
+    /* A branch into the delay slot of a `b`: the slot runs, then the
+     * instruction after it -- the walk follows on, and the body does too,
+     * into another function's code if that is where it is. */
+    for (int other = 0; other < 2; other++) {
+        memset(g_w, 0, sizeof g_w);
+        g_w[0x00 / 4] = bne(A0, 0, BASE, BASE + 0x0C);
+        g_w[0x08 / 4] = beq(0, 0, BASE + 0x08, BASE + 0x20);
+        g_w[0x0C / 4] = ori(V0, 0, 1);          /* b's slot, and a branch target */
+        g_w[0x10 / 4] = JR_RA;
+        g_w[0x20 / 4] = JR_RA; g_w[0x24 / 4] = ori(V0, 0, 2);
+        store();
+        uint32_t sd[2] = { BASE, BASE + 0x10 };
+        setup(&an, 0x28);
+        CHECK(a_discover(&an, sd, other ? 2 : 1) == 0, "discover (slot target %d)", other);
+        CHECK(an.owner[0x10 / 4] == (other ? BASE + 0x10 : BASE),
+              "the code after the slot is walked (%d): owner 0x%08X", other, an.owner[0x10 / 4]);
+        const char *src = emit_source(&an, other ? "t_slot_target_o" : "t_slot_target");
+        CHECK(strstr(src, "not discovered") == NULL, "slot target %d: nothing undiscovered", other);
+        if (other) {
+            const char *body = strstr(src, "static void psp_body_08804000");
+            const char *call = body ? strstr(body, "psp_func_08804010()") : NULL;
+            const char *next = body ? strstr(body, "static void psp_body_08804010") : NULL;
+            CHECK(call && (!next || call < next), "slot target: runs on into 0x08804010");
+        }
+        a_analysis_free(&an);
+    }
+
+    /* Always-taken branches end the straight line in the walk and in the
+     * emitted body. */
+    check_always("b", "t_always_b", beq(0, 0, BASE, BASE + 0x18));
+    check_always("beq $a1, $a1", "t_always_beq", beq(A1, A1, BASE, BASE + 0x18));
+    check_always("bgez $zero", "t_always_bgez", bgez(0, BASE, BASE + 0x18));
+    check_always("beql $zero, $zero", "t_always_beql", beql(0, 0, BASE, BASE + 0x18));
+
+    /* A body whose last instruction can fall through, into code that is no
+     * function (here an undecodable word stops the walk), transfers there
+     * explicitly instead of returning as if it had finished. */
+    {
+        memset(g_w, 0, sizeof g_w);
+        g_w[0x00 / 4] = ori(V0, 0, 1);
+        g_w[0x04 / 4] = 0x0000003Fu;            /* not an instruction */
+        store();
+        uint32_t s0 = BASE;
+        setup(&an, 0x10);
+        CHECK(a_discover(&an, &s0, 1) == 0, "discover (runs off)");
+        const char *src = emit_source(&an, "t_runs_off");
+        CHECK(strstr(src, "psp_dispatch(0x08804008u);  /* not discovered */") != NULL,
+              "running off the end transfers to the next address");
+        a_analysis_free(&an);
+    }
 
     /* An entry inside the bound that is not code in .text rejects the whole
      * table: the jr stays a computed jump. */
