@@ -55,3 +55,7 @@ add_test(NAME emit_vfim COMMAND test_emit_vfim)
 add_executable(test_emit_split test_emit_split.c)
 target_link_libraries(test_emit_split PRIVATE allegrex_core)
 add_test(NAME emit_split COMMAND test_emit_split)
+
+add_executable(test_hle_trace test_hle_trace.c)
+target_link_libraries(test_hle_trace PRIVATE psprecomp)
+add_test(NAME hle_trace COMMAND test_hle_trace)
