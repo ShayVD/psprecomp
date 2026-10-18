@@ -94,10 +94,10 @@ static void comment(ectx *c, const a_insn *in) {
     fprintf(c->out, "    /* %08X  %s */\n", in->addr, text);
 }
 
-/* Emit a call to whatever lives at a static target. */
-static void emit_static_call(ectx *c, uint32_t target) {
+/* Emit a call to whatever lives at a static target, at indent `ind`. */
+static void emit_static_call_at(ectx *c, uint32_t target, const char *ind) {
     if (is_import(c->an, target)) {
-        fprintf(c->out, "    psp_import_%08X();\n", target);
+        fprintf(c->out, "%spsp_import_%08X();\n", ind, target);
     } else if (is_function(c->an, target)) {
         /* Check the stack across the call. A callee that consumes stack and
          * does not return it corrupts every callee-saved register its caller
@@ -105,13 +105,17 @@ static void emit_static_call(ectx *c, uint32_t target) {
          * at the call site catches it wherever the imbalance actually occurs --
          * including across split bodies, where no single body owns both halves
          * of a frame and a per-body check is blind. */
-        fprintf(c->out, "    { uint32_t _spc = r_sp; psp_func_%08X();"
-                        " PSP_SP_CALL(0x%08Xu, _spc, r_sp); }\n", target, target);
+        fprintf(c->out, "%s{ uint32_t _spc = r_sp; psp_func_%08X();"
+                        " PSP_SP_CALL(0x%08Xu, _spc, r_sp); }\n", ind, target, target);
     } else {
         /* Discovery did not reach it. Going through the dispatch table means
          * the failure is named at run time instead of failing to link. */
-        fprintf(c->out, "    psp_dispatch(0x%08Xu);  /* not discovered */\n", target);
+        fprintf(c->out, "%spsp_dispatch(0x%08Xu);  /* not discovered */\n", ind, target);
     }
+}
+
+static void emit_static_call(ectx *c, uint32_t target) {
+    emit_static_call_at(c, target, "    ");
 }
 
 /* ---- one non-control-flow instruction ------------------------------------ */
@@ -546,6 +550,16 @@ static void emit_function(ectx *c, const a_func *fn) {
         if (in.is_jump && !in.is_indirect && in.has_target &&
             owned_by(an, in.target, owner) && !is_function(an, in.target))
             c->is_label[widx(an, in.target)] = 1;
+        /* A recovered switch: each case block this function owns is a goto
+         * target (a case that is another function's entry is a tail call). */
+        if (in.is_indirect && !in.is_call && !in.is_return) {
+            const a_jtable *jt = a_find_jtable(an, a);
+            for (uint32_t k = 0; jt && k < jt->count; k++) {
+                const uint32_t t = an->jt_targets[jt->first + k];
+                if (owned_by(an, t, owner) && !is_function(an, t))
+                    c->is_label[widx(an, t)] = 1;
+            }
+        }
         if (in.has_delay_slot && owned_by(an, a + 4, owner))
             c->is_slot[widx(an, a + 4)] = 1;
     }
@@ -762,8 +776,36 @@ static void emit_function(ectx *c, const a_func *fn) {
         }
 
         if (in.is_indirect) {                    /* jr $rN — computed jump */
-            if (have_slot) { comment(c, &slot); emit_simple(c, &slot, "    "); }
-            fprintf(f, "    psp_dispatch(%s);\n    return;\n", RN[in.rs]);
+            const a_jtable *jt = a_find_jtable(an, a);
+            if (jt) {
+                /* A recovered switch. The hardware reads the register before
+                 * the delay slot runs, so capture it first. The switch is on
+                 * the address the jr jumps to, not on the index, so the
+                 * table's lowest index (jt->lo) does not matter here. A
+                 * target the function owns is a goto; a target that is
+                 * another function's entry is a tail call, as for `j`. */
+                fprintf(f, "    { uint32_t _sw = %s;\n", RN[in.rs]);
+                if (have_slot) { comment(c, &slot); emit_simple(c, &slot, "      "); }
+                fprintf(f, "      switch (_sw) {\n");
+                for (uint32_t k = 0; k < jt->count; k++) {
+                    const uint32_t t = an->jt_targets[jt->first + k];
+                    int dup = 0;
+                    for (uint32_t j = 0; j < k && !dup; j++)
+                        dup = an->jt_targets[jt->first + j] == t;
+                    if (dup) continue;               /* case values must be distinct */
+                    if (owned_by(an, t, owner) && !is_function(an, t)) {
+                        fprintf(f, "      case 0x%08Xu: goto L_%08X;\n", t, t);
+                    } else {
+                        fprintf(f, "      case 0x%08Xu:\n", t);
+                        emit_static_call_at(c, t, "        ");
+                        fprintf(f, "        return;\n");
+                    }
+                }
+                fprintf(f, "      default: psp_dispatch(_sw); return;\n      }\n    }\n");
+            } else {
+                if (have_slot) { comment(c, &slot); emit_simple(c, &slot, "    "); }
+                fprintf(f, "    psp_dispatch(%s);\n    return;\n", RN[in.rs]);
+            }
             if (have_slot && c->is_label[widx(an, a + 4)]) emit_slot_alias(c, a, &slot, 0);
             a += 4;
             continue;

@@ -1,6 +1,7 @@
 /* SNC switch tables: recovered during discovery, case blocks kept inside the
  * function. Synthetic code only, no game data. */
 #include "analyze.h"
+#include "emit.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -481,6 +482,23 @@ static void setup(a_analysis *an, uint32_t text_size) {
     an->image_size = sizeof g_code;
 }
 
+/* Emit the discovered code and return the function source. */
+static const char *emit_source(const a_analysis *an) {
+    static char src[1 << 16];
+    emit_opts o;
+    memset(&o, 0, sizeof o);
+    o.outdir = ".";
+    o.prefix = "t_switch";
+    o.module = "synthetic";
+    src[0] = '\0';
+    CHECK(a_emit(an, &o) == 0, "emit");
+    FILE *f = fopen("./t_switch_funcs.c", "rb");
+    size_t len = f ? fread(src, 1, sizeof src - 1, f) : 0;
+    src[len] = '\0';
+    if (f) fclose(f);
+    return src;
+}
+
 int main(void) {
     a_analysis an;
     uint32_t seed = BASE;
@@ -508,6 +526,53 @@ int main(void) {
     a_analysis_free(&an);
     CHECK(an.jtables == NULL && an.njtables == 0 && an.jt_targets == NULL &&
           an.njt_targets == 0, "free clears the tables");
+
+    /* The emitter turns the table into a C switch on the loaded target
+     * (the address the jr jumps to, so the table's lowest index does not
+     * matter). A case the function owns is a goto. */
+    {
+        uint32_t s1 = BASE;
+        build(BASE + 0x3C);
+        setup(&an, 0x44);
+        CHECK(a_discover(&an, &s1, 1) == 0, "discover for emit");
+        const char *src = emit_source(&an);
+        CHECK(strstr(src, "{ uint32_t _sw = r_at;") != NULL, "target read before the delay slot");
+        CHECK(strstr(src, "switch (_sw) {") != NULL, "switch on the loaded target");
+        CHECK(strstr(src, "case 0x08804020u: goto L_08804020;") != NULL, "case 0");
+        CHECK(strstr(src, "case 0x0880402Cu: goto L_0880402C;") != NULL, "case 1");
+        CHECK(strstr(src, "case 0x0880403Cu: goto L_0880403C;") != NULL, "case 2");
+        CHECK(strstr(src, "default: psp_dispatch(_sw); return;") != NULL, "default dispatches");
+        CHECK(strstr(src, "psp_dispatch(r_at);") == NULL, "no bare computed dispatch left");
+        CHECK(strstr(src, "L_0880403C: PSP_MARK") != NULL, "case 2 label emitted");
+        a_analysis_free(&an);
+    }
+
+    /* A case that is another function's entry is a tail call, not a goto
+     * (and there is no label for it). Two cases with one target give one
+     * case label. */
+    {
+        uint32_t s2[2] = { BASE, BASE + 0x3C };
+        build(BASE + 0x3C);
+        g_w[0x104 / 4] = BASE + 0x20;           /* case 1 repeats case 0 */
+        store();
+        setup(&an, 0x44);
+        CHECK(a_discover(&an, s2, 2) == 0, "discover for emit (entry target)");
+        const char *src = emit_source(&an);
+        const char *c2 = strstr(src, "case 0x0880403Cu:\n");
+        CHECK(c2 != NULL, "entry case emitted as a call");
+        CHECK(c2 && strstr(c2, "psp_func_0880403C(); PSP_SP_CALL(0x0880403Cu") != NULL &&
+              strstr(c2, "psp_func_0880403C(); PSP_SP_CALL(0x0880403Cu") < strstr(c2, "default:"),
+              "entry case calls the function");
+        CHECK(strstr(src, "goto L_0880403C") == NULL, "no goto into another function");
+        const char *lbl = strstr(src, "L_0880403C:");
+        CHECK(lbl && strstr(lbl + 1, "L_0880403C:") == NULL,
+              "only the function's own entry label");
+        CHECK(strstr(src, "case 0x08804020u: goto L_08804020;") != NULL, "owned case still a goto");
+        const char *sw = strstr(src, "switch (_sw) {");
+        const char *first = sw ? strstr(sw, "case 0x08804020u") : NULL;
+        CHECK(first && strstr(first + 1, "case 0x08804020u") == NULL, "duplicate target: one case");
+        a_analysis_free(&an);
+    }
 
     /* An entry inside the bound that is not code in .text rejects the whole
      * table: the jr stays a computed jump. */
