@@ -158,7 +158,7 @@ int main(void) {
     /* Registration wires the address to the function. */
     src = slurp("./t_emit_funcs.c", NULL);
     if (src) {
-        expect_contains(src, "psp_register(0x08804000u, psp_func_08804000);",
+        expect_contains(src, "{ 0x08804000u, psp_func_08804000 },",
                         "the function is registered for indirect dispatch");
         free(src);
     }

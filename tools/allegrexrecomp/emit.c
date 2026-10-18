@@ -1019,17 +1019,27 @@ int a_emit(const a_analysis *an, const emit_opts *o) {
     fprintf(f,
         "\n/* ---------------------------------------------------------------\n"
         " * Populate the dispatch table. Indirect calls -- function pointers,\n"
-        " * vtables, callbacks, switch tables — resolve through this.\n"
+        " * vtables, callbacks, switch tables -- resolve through this.\n"
+        " * Tables, not call statements: 90k calls in one function make the\n"
+        " * compiler take minutes. Each table ends with a { 0, NULL } sentinel.\n"
         " * ------------------------------------------------------------- */\n"
-        "void psp_recomp_register(void) {\n");
+        "static const struct { uint32_t addr; psp_fn_t fn; } psp_recomp_funcs[] = {\n");
     for (int i = 0; i < an->nfuncs; i++)
-        fprintf(f, "    psp_register(0x%08Xu, psp_func_%08X);\n",
+        fprintf(f, "    { 0x%08Xu, psp_func_%08X },\n",
                 an->funcs[i].addr, an->funcs[i].addr);
-    /* Interior labels last, so a real function entry always wins a collision. */
+    fprintf(f, "    { 0u, 0 }\n};\n"
+               "static const struct { uint32_t addr; psp_fn_t fn; } psp_recomp_labels[] = {\n");
     for (int i = 0; i < c.nentries; i++)
-        fprintf(f, "    psp_register_label(0x%08Xu, psp_at_%08X);\n",
-                c.entries[i], c.entries[i]);
-    fprintf(f, "}\n");
+        fprintf(f, "    { 0x%08Xu, psp_at_%08X },\n", c.entries[i], c.entries[i]);
+    fprintf(f, "    { 0u, 0 }\n};\n"
+        "void psp_recomp_register(void) {\n"
+        "    for (uint32_t i = 0; psp_recomp_funcs[i].fn; i++)\n"
+        "        psp_register(psp_recomp_funcs[i].addr, psp_recomp_funcs[i].fn);\n"
+        "    /* Interior labels last, so a real function entry always wins a collision. */\n"
+        "    for (uint32_t i = 0; psp_recomp_labels[i].fn; i++)\n"
+        "        psp_register_label(psp_recomp_labels[i].addr, psp_recomp_labels[i].fn);\n"
+        "}\n");
+
 
     free(c.is_label);
     free(c.is_slot);

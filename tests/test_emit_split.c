@@ -64,8 +64,8 @@ int main(void) {
         expect(strstr(p1, "void psp_func_08804020(void)") != NULL, "f2 in part 1");
         expect(strstr(p1, "void psp_func_08804000(void) {") == NULL, "f0 not repeated in part 1");
         expect(strstr(reg, "void psp_recomp_register(void)") != NULL, "register function");
-        expect(strstr(reg, "psp_register(0x08804020u, psp_func_08804020);") != NULL, "f2 registered");
-        expect(strstr(p0, "psp_recomp_register") == NULL, "no registration in parts");
+        expect(strstr(reg, "{ 0x08804020u, psp_func_08804020 },") != NULL, "f2 registered");
+        expect(strstr(p0, "psp_recomp_register") == NULL && strstr(p0, "psp_recomp_funcs") == NULL, "no registration in parts");
     }
     remove("./t_split_funcs_000.c");
     remove("./t_split_funcs_001.c");
