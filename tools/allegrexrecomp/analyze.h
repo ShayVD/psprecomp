@@ -149,6 +149,21 @@ int a_scan_data_pointers(const a_analysis *an,
                          const uint8_t *region, uint32_t region_len,
                          uint32_t *out, int max);
 
+/* Scan the code (the scan range, normally .text) for addresses built in
+ * registers: `lui rX, hi` followed within a few instructions by
+ * `addiu rY, rX, lo` or `ori rY, rX, lo`, with rX not rewritten in between.
+ *
+ * This is how a statically linked module passes a function pointer: crt0
+ * hands its main-thread entry to sceKernelCreateThread this way, and so do
+ * callback and handler registrations. No `jal` and no data word names those
+ * functions, so neither the call harvest nor the data scan sees them.
+ *
+ * Like a_scan_data_pointers this is a heuristic. A target is kept only if it
+ * lies inside the scan range, is word-aligned, is not an import stub and
+ * decodes as a valid instruction. `out` receives candidates (duplicates
+ * possible); returns the number found, which may exceed `max`. */
+int a_scan_address_pairs(const a_analysis *an, uint32_t *out, int max);
+
 void a_analysis_free(a_analysis *an);
 
 /* Is `addr` inside the discovered code extent? */

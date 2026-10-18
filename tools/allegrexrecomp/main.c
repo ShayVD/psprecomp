@@ -465,12 +465,21 @@ static int seed_in_code(const elf_info *e, uint32_t p) {
     return p >= e->text_addr && p < e->text_addr + e->text_size;
 }
 
+/* Where discovery's seeds came from, for the `funcs` report. */
+typedef struct {
+    int nseeds;      /* total */
+    int nexports;
+    int nptr;        /* relocations, or scanned data pointers */
+    int scanned;     /* nptr came from the heuristic data scan */
+    int npair;       /* lui/addiu and lui/ori address pairs in code */
+} seed_stats;
+
 /* Load a decrypted module and run discovery over it. On success the caller
  * owns both `b` (psp_blob_free) and `an` (a_analysis_free). Shared by `funcs`
  * and `emit`, which differ only in what they do with the result. */
 static int load_and_discover(const char *path, psp_blob *b, elf_info *e,
-                             a_analysis *an, int *out_nseeds, int *out_nexports,
-                             int *out_nptr, int *out_scanned) {
+                             a_analysis *an, seed_stats *st) {
+    memset(st, 0, sizeof *st);
     if (psp_blob_read(path, b) != 0) { fprintf(stderr, "cannot read %s\n", path); return -1; }
 
     if (psp_sniff(b->data, b->size < 16 ? b->size : 16) != FMT_ELF ||
@@ -572,9 +581,24 @@ static int load_and_discover(const char *path, psp_blob *b, elf_info *e,
                 }
                 nptr = kept;
                 nseeds += nptr;
-                if (out_scanned) *out_scanned = 1;
+                st->scanned = 1;
             }
         }
+    }
+
+    /* Function pointers built in registers (see a_scan_address_pairs). Kept
+     * only if they land in an executable section, like the data pointers. */
+    int npair = a_scan_address_pairs(an, NULL, 0);
+    if (npair > 0) {
+        uint32_t *bigger = (uint32_t *)realloc(seeds, (size_t)(nseeds + npair) * sizeof *seeds);
+        if (!bigger) { free(seeds); psp_blob_free(b); return -1; }
+        seeds = bigger;
+        npair = a_scan_address_pairs(an, seeds + nseeds, npair);
+        int kept = 0;
+        for (int i = 0; i < npair; i++)
+            if (seed_in_code(e, seeds[nseeds + i])) seeds[nseeds + kept++] = seeds[nseeds + i];
+        npair = kept;
+        nseeds += npair;
     }
 
     int rc = a_discover(an, seeds, nseeds);
@@ -585,10 +609,10 @@ static int load_and_discover(const char *path, psp_blob *b, elf_info *e,
         return -1;
     }
 
-    if (out_nseeds)   *out_nseeds = nseeds;
-    if (out_nexports) *out_nexports = nexports;
-    if (out_nptr)     *out_nptr = nptr;
-    (void)out_scanned;
+    st->nseeds = nseeds;
+    st->nexports = nexports;
+    st->nptr = nptr;
+    st->npair = npair;
     return 0;
 }
 
@@ -596,16 +620,17 @@ static int cmd_funcs(const char *path, int list) {
     psp_blob b;
     elf_info e;
     a_analysis an;
-    int nseeds = 0, nexports = 0, nptr = 0, scanned = 0;
+    seed_stats st;
 
-    if (load_and_discover(path, &b, &e, &an, &nseeds, &nexports, &nptr, &scanned) != 0) return 1;
+    if (load_and_discover(path, &b, &e, &an, &st) != 0) return 1;
 
     printf("module:     %s\n", path);
     printf("code:       0x%08X + %u bytes  (%u instructions)\n",
            an.base, an.size, an.size / 4);
-    printf("seeds:      %d (entry 0x%08X + %d exports + %d %s)\n",
-           nseeds, e.entry, nexports, nptr,
-           scanned ? "scanned data pointers (heuristic)" : "relocation pointers");
+    printf("seeds:      %d (entry 0x%08X + %d exports + %d %s + %d address pairs)\n",
+           st.nseeds, e.entry, st.nexports, st.nptr,
+           st.scanned ? "scanned data pointers (heuristic)" : "relocation pointers",
+           st.npair);
     printf("\n");
     printf("functions:  %d\n", an.nfuncs);
     /* `an.size` is the whole loaded image -- code plus .data plus .bss -- so
@@ -728,7 +753,8 @@ static int cmd_emit(const char *path, const char *outdir, const char *prefix, in
     elf_info e;
     a_analysis an;
 
-    if (load_and_discover(path, &b, &e, &an, NULL, NULL, NULL, NULL) != 0) return 1;
+    seed_stats st;
+    if (load_and_discover(path, &b, &e, &an, &st) != 0) return 1;
 
     psp_module_info mi;
     const char *module = "(unknown)";

@@ -52,6 +52,33 @@ static uint32_t fetch(const a_analysis *an, uint32_t addr) {
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
+/* The general-purpose register an instruction writes, or -1 if it writes
+ * none. Used by the matchers below to ask "was this register set again in
+ * between?", so it must not miss a writer; every GPR-writing op the decoder
+ * names is listed. */
+static int gpr_written(const a_insn *in) {
+    switch (in->op) {
+    case A_SLL: case A_SRL: case A_SRA: case A_SLLV: case A_SRLV: case A_SRAV:
+    case A_ROTR: case A_ROTRV: case A_MOVZ: case A_MOVN: case A_MFHI: case A_MFLO:
+    case A_CLZ: case A_CLO: case A_ADD: case A_ADDU: case A_SUB: case A_SUBU:
+    case A_AND: case A_OR: case A_XOR: case A_NOR: case A_SLT: case A_SLTU:
+    case A_MAX: case A_MIN: case A_JALR:
+    case A_WSBH: case A_WSBW: case A_SEB: case A_SEH: case A_BITREV:
+        return in->rd;
+    case A_ADDI: case A_ADDIU: case A_SLTI: case A_SLTIU: case A_ANDI: case A_ORI:
+    case A_XORI: case A_LUI: case A_EXT: case A_INS:
+    case A_LB: case A_LH: case A_LWL: case A_LW: case A_LBU: case A_LHU: case A_LWR:
+    case A_LL: case A_SC:
+    case A_MFC0: case A_CFC0: case A_MFIC: case A_MFC1: case A_CFC1:
+    case A_MFV: case A_MFVC:
+        return in->rt;
+    case A_JAL: case A_BLTZAL: case A_BGEZAL: case A_BLTZALL: case A_BGEZALL:
+        return PSP_RA_INDEX;
+    default:
+        return -1;
+    }
+}
+
 /* ---- the walk ------------------------------------------------------------ */
 
 typedef struct {
@@ -648,6 +675,57 @@ int a_scan_data_pointers(const a_analysis *an,
 
         if (found < max) out[found] = v;
         found++;
+    }
+    return found;
+}
+
+/* How far a low half may follow its lui. Compilers schedule the pair close
+ * together; SNC's crt0 has it two instructions apart. */
+#define PAIR_WINDOW 16
+
+int a_scan_address_pairs(const a_analysis *an, uint32_t *out, int max) {
+    const uint32_t sbase = an->scan_size ? an->scan_base : an->base;
+    const uint32_t ssize = an->scan_size ? an->scan_size : an->size;
+    int found = 0;
+
+    for (uint32_t off = 0; off + 4 <= ssize; off += 4) {
+        const uint32_t a = sbase + off;
+        if (!a_in_range(an, a)) continue;
+        a_insn hi;
+        a_decode(fetch(an, a), a, &hi);
+        if (hi.op != A_LUI || hi.rt == 0) continue;
+
+        int stop_after = -1;          /* instructions left before control leaves */
+        for (int i = 1; i <= PAIR_WINDOW && stop_after != 0; i++) {
+            const uint32_t b = a + (uint32_t)i * 4;
+            if (!a_in_range(an, b)) break;
+            if (stop_after > 0) stop_after--;
+            a_insn lo;
+            a_decode(fetch(an, b), b, &lo);
+
+            if ((lo.op == A_ADDIU || lo.op == A_ORI) && lo.rs == hi.rt) {
+                /* addiu's immediate is sign-extended and ori's zero-extended;
+                 * the decoder already did that, so plain addition is right. */
+                const uint32_t t = ((uint32_t)hi.imm << 16) + (uint32_t)lo.imm;
+                a_insn probe;
+                if (t >= sbase && t - sbase < ssize && (t & 3) == 0 &&
+                    !is_import_stub(an, t) && a_in_range(an, t) &&
+                    a_decode(fetch(an, t), t, &probe) && probe.op != A_INVALID) {
+                    if (found < max && out) out[found] = t;
+                    found++;
+                }
+                /* One lui can feed several low halves (lui; addiu a0; addiu
+                 * a1), so keep looking unless this one replaced the high half. */
+                if (lo.rt == hi.rt) break;
+                continue;
+            }
+            if (gpr_written(&lo) == hi.rt) break;            /* high half gone */
+            /* An unconditional transfer ends the straight line after its
+             * delay slot; a pair does not span into unrelated code. */
+            if ((lo.is_jump && !lo.is_call) || lo.is_return ||
+                (lo.is_indirect && !lo.is_call))
+                stop_after = 1;
+        }
     }
     return found;
 }
