@@ -46,13 +46,21 @@ typedef struct {
     unsigned has_vfpu    : 1;   /* touches the VFPU */
 } a_func;
 
-/* A switch table recovered at a `jr $rN` site. Its targets, in table order
- * (duplicates kept), are an->jt_targets[first .. first + count). */
+/* A switch table recovered at a `jr $rN` site.
+ *
+ * The code indexes a table at `table - 4 * lo`, but its bound only lets
+ * indexes lo .. lo + count - 1 through, so only those entries are recorded:
+ * `table` is the address of the first reachable one. Their targets, in
+ * table order (duplicates kept), are an->jt_targets[first .. first + count).
+ * The targets are code in .text; where the table itself lives is not
+ * checked. */
 typedef struct {
     uint32_t site;      /* the jr */
-    uint32_t table;     /* the table, in .rodata */
+    uint32_t table;     /* the first reachable entry */
+    uint32_t lo;        /* its index in the table the code indexes */
     uint32_t first;
-    uint32_t count;     /* the bound from the sltiu */
+    uint32_t count;     /* reachable entries, from the sltiu/slti bound and
+                         * any lower bound, corrected for offsets */
 } a_jtable;
 
 typedef struct {
@@ -108,7 +116,8 @@ typedef struct {
 
     /* Jump tables recovered from the `jr $rN` sites. They are resolved as
      * the walk reaches each jr, so their targets are blocks of the function
-     * containing the switch. */
+     * containing the switch (or functions of their own, if already entries),
+     * and checked against every way into their code once the walk is done. */
     int       ntables;          /* tables resolved (== njtables) */
     int       ntable_targets;   /* total entries across them (== njt_targets) */
     a_jtable *jtables;          /* sorted by site */
