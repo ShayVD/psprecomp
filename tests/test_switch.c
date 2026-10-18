@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define BASE  0x08804000u
 #define TABLE (BASE + 0x100u)        /* "rodata": in the image, past .text */
@@ -344,6 +345,54 @@ static void check_chain(const char *name, int n, uint32_t last_slot0, int want_t
     a_analysis_free(&an);
 }
 
+/* A state machine: every case adjusts the key and branches back to the
+ * switch's bound, so paths into the jr can run through the cases in any
+ * order -- N^depth chains. Checking them all is too slow; past the per-table
+ * budget the table is rejected and its cases promoted. */
+#define SM_N 32
+static void check_state_machine(void) {
+    enum { TEXT = 0x40 + SM_N * 16 + 0x10, SIZE = TEXT + SM_N * 4 };
+    static uint32_t w[SIZE / 4];
+    static uint8_t code[SIZE];
+    const uint32_t table = BASE + TEXT;
+    memset(w, 0, sizeof w);
+    w[0] = sltiu(A2, A0, SM_N);
+    w[1] = beq(A2, 0, BASE + 4, BASE + 0x30);
+    w[2] = sll(A1, A0, 2);
+    w[3] = lui(AT, (table + 0x8000u) >> 16);
+    w[4] = addu(AT, AT, A1);
+    w[5] = lw(AT, (int)(int16_t)(table & 0xFFFF), AT);
+    w[6] = jr(AT);
+    w[0x30 / 4] = JR_RA;                                /* default */
+    for (int i = 0; i < SM_N; i++) {
+        const uint32_t c = 0x40 + 16u * (uint32_t)i;
+        w[c / 4]     = addiu(A0, A0, (i & 1) ? -1 : 0);
+        w[c / 4 + 1] = addiu(A0, A0, 0);
+        w[c / 4 + 2] = beq(0, 0, BASE + c + 8, BASE);   /* b to the bound */
+        w[TEXT / 4 + i] = BASE + c;
+    }
+    for (size_t k = 0; k < SIZE / 4; k++)
+        for (int b = 0; b < 4; b++) code[k * 4 + b] = (uint8_t)(w[k] >> (8 * b));
+
+    a_analysis an;
+    memset(&an, 0, sizeof an);
+    an.code = code; an.base = BASE; an.size = SIZE;
+    an.scan_base = BASE; an.scan_size = TEXT;
+    an.image = code; an.image_base = BASE; an.image_size = SIZE;
+    uint32_t seed = BASE;
+    const clock_t t0 = clock();
+    CHECK(a_discover(&an, &seed, 1) == 0, "state machine: discover");
+    const double secs = (double)(clock() - t0) / CLOCKS_PER_SEC;
+    CHECK(an.njtables == 0 && an.nindirects == 1,
+          "state machine: table rejected once the budget runs out (%d tables)", an.njtables);
+    for (int i = 0; i < SM_N; i++) {
+        const uint32_t c = BASE + 0x40 + 16u * (uint32_t)i;
+        CHECK(an.owner[(c - BASE) / 4] == c, "state machine: case 0x%08X is a function", c);
+    }
+    CHECK(secs < 2.0, "state machine: took %.2f s", secs);
+    a_analysis_free(&an);
+}
+
 /* Only a lower bound (`bne` on the slti): the table's size is unknown. */
 static void seq_lower_only(asm_t *as) {
     emit(as, slti(A1, A0, 3));
@@ -513,6 +562,7 @@ int main(void) {
     check_chain("eight merges, same bound", 8, sltiu(A2, A0, 3), 1);
     check_chain("nine merges: too deep to check", 9, sltiu(A2, A0, 3), 0);
     check_seq("merge, constant key on the edge", seq_const_key, A0, 3);
+    check_state_machine();
 
     /* The block another function branches into is promoted to an entry, but
      * only so the emitter can reach it: its one way in is that branch, which

@@ -202,9 +202,17 @@ enum { JT_EDGE_BRANCH, JT_EDGE_ENTRY };
 
 typedef struct { int kind; uint32_t at, from; int step; } jt_edge;
 
-/* The most edges one path is checked through (see check_tables). In this
- * game 8 is the depth every table's paths fit in; 4 rejected six of them. */
+/* The most edges one path is checked through (see check_tables). The
+ * deepest chain any of this game's tables needs is exactly 8 (with 4, six
+ * of them were rejected). A table with a path needing more is rejected and
+ * its targets promoted to entries, like any other rejected table. */
 #define JT_EDGE_DEPTH 8
+
+/* The most check_paths calls one table may use. The chains multiply: a state
+ * machine whose cases branch back into its own switch has N^depth of them.
+ * A table that runs out is rejected and its targets promoted. The most any
+ * of this game's tables needs is 1,108 (the switch at 0x0894ABC8). */
+#define JT_CHECK_BUDGET 50000
 
 typedef struct {
     const a_analysis *an;
@@ -862,6 +870,7 @@ typedef struct {
     const a_analysis *an;
     const uint8_t    *entry_map;
     const edgelist   *edges;            /* sorted by target */
+    long              calls;            /* check_paths calls for this table */
 } jt_check;
 
 static int edge_in_chain(const jt_edge *chain, int n, const jt_edge *e) {
@@ -877,10 +886,12 @@ static int edge_in_chain(const jt_edge *chain, int n, const jt_edge *e) {
  * last edge's code on (an edge into step k changes step k + 1). Each is
  * followed in turn, up to JT_EDGE_DEPTH edges in all; a path needing more,
  * or one the match fails on, fails the check. An edge already on the chain
- * is not taken again: the path would run through the same loop twice. */
-static int check_paths(const jt_check *ck, uint32_t site, const a_jtable *ref,
+ * is not taken again: the path would run through the same loop twice. A
+ * table whose chains need more than JT_CHECK_BUDGET calls fails too. */
+static int check_paths(jt_check *ck, uint32_t site, const a_jtable *ref,
                        jt_edge *chain, int nchain) {
     const a_analysis *an = ck->an;
+    if (++ck->calls > JT_CHECK_BUDGET) return 0;        /* too many to check */
     jt_path p;
     a_jtable r;
     build_path(an, site, chain, nchain, &p);
@@ -930,8 +941,9 @@ static int check_paths(const jt_check *ck, uint32_t site, const a_jtable *ref,
  * the jr that enters the code the match reads through at most JT_EDGE_DEPTH
  * such edges (without repeating one), the match succeeds and its reachable
  * indexes are within the table's; otherwise the table is rejected,
- * including when a path would need more edges. Code that is not reached by
- * discovery contributes no edges. An entry counts as an edge from unknown
+ * including when a path would need more edges or the table's chains exceed
+ * JT_CHECK_BUDGET checks. Code that is not reached by discovery contributes
+ * no edges. An entry counts as an edge from unknown
  * code only when it is one in its own right; an address promoted from a
  * cross-function branch is an entry only for the emitter's sake, and its
  * branches are edges here already.
@@ -962,7 +974,7 @@ static int check_tables(const a_analysis *an, const uint8_t *seen, uint8_t *entr
         }
     qsort(el.v, (size_t)el.n, sizeof *el.v, cmp_edge);
 
-    const jt_check ck = { an, entry_map, &el };
+    jt_check ck = { an, entry_map, &el, 0 };
     int rejected = 0;
     for (int j = 0; j < jts->n; j++) {
         const a_jtable *t = &jts->v[j];
@@ -970,6 +982,7 @@ static int check_tables(const a_analysis *an, const uint8_t *seen, uint8_t *entr
         a_jtable ref;
         jt_edge chain[JT_EDGE_DEPTH];
         build_path(an, t->site, NULL, 0, &p);
+        ck.calls = 0;
         if (ok_mem && match_table(&p, t->site, &ref) && check_paths(&ck, t->site, &ref, chain, 0))
             continue;
         no_table[word_index(an, t->site)] = 1;
