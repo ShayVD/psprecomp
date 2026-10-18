@@ -39,18 +39,20 @@ static void entry_push(ectx *c, uint32_t a) {
 }
 
 /* vfim carries a half-precision float. Expanding it here keeps the runtime
- * dealing only in single precision. */
-static float half_to_float(uint16_t h) {
+ * dealing only in single precision. Returns the exact binary32 bit pattern. */
+static uint32_t half_to_bits(uint16_t h) {
     const uint32_t sign = (uint32_t)(h >> 15) << 31;
-    const uint32_t exp  = (h >> 10) & 0x1F;
-    const uint32_t man  = h & 0x3FF;
-    uint32_t bits;
-    if (exp == 0)        bits = sign | (man ? ((127 - 15 + 1) << 23) | (man << 13) : 0);
-    else if (exp == 31)  bits = sign | 0x7F800000u | (man << 13);
-    else                 bits = sign | ((exp + 127 - 15) << 23) | (man << 13);
-    float f;
-    memcpy(&f, &bits, sizeof f);
-    return f;
+    uint32_t exp = (h >> 10) & 0x1F;
+    uint32_t man = h & 0x3FF;
+    if (exp == 31) return sign | 0x7F800000u | (man << 13);   /* inf / NaN */
+    if (exp == 0) {
+        if (man == 0) return sign;                            /* +-0 */
+        /* Denormal: value is man * 2^-24. Normalise so bit 10 is set. */
+        uint32_t e = 0;
+        while (!(man & 0x400)) { man <<= 1; e++; }
+        return sign | ((127 - 15 + 1 - e) << 23) | ((man & 0x3FF) << 13);
+    }
+    return sign | ((exp + 127 - 15) << 23) | (man << 13);
 }
 /* ---- helpers ------------------------------------------------------------- */
 
@@ -436,10 +438,16 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
         fprintf(f, "%spsp_vimm(%u, %.1ff);\n", ind, in->vd, (double)in->imm);
         return;
     case A_VFIM:
-        /* A cast, not an `f` suffix: "%.9g" prints integral values without a
-         * decimal point, and "-1f" is not a C literal. */
-        fprintf(f, "%spsp_vimm(%u, (float)%.9g);\n", ind, in->vd,
-                (double)half_to_float((uint16_t)in->imm));
+        /* Emit the binary32 bits, not a decimal literal: "%.9g" prints
+         * integral values as "-1" (no `f` suffix is valid), and loses -0,
+         * inf and NaN. Bits are exact for every value. */
+        {
+            const uint32_t bits = half_to_bits((uint16_t)in->imm);
+            float fv;
+            memcpy(&fv, &bits, sizeof fv);
+            fprintf(f, "%spsp_vimm(%u, psp_bits_to_f32(0x%08Xu));  /* %.9g */\n",
+                    ind, in->vd, bits, (double)fv);
+        }
         return;
 
     /* Matrix ops that need no multiply. `vsize` is the matrix order here. */
