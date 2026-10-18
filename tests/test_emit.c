@@ -96,6 +96,7 @@ int main(void) {
           (unsigned long long)an.insns);
 
     emit_opts o;
+    memset(&o, 0, sizeof o);
     o.outdir = ".";
     o.prefix = "t_emit";
     o.module = "synthetic";

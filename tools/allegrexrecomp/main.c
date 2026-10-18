@@ -33,7 +33,7 @@ static int usage(void) {
         "  allegrexrecomp dis     <file> [start-addr] [count]\n"
         "  allegrexrecomp cover   <file>\n"
         "  allegrexrecomp funcs   <file> [--list]\n"
-        "  allegrexrecomp emit    <file> <outdir> [prefix]\n"
+        "  allegrexrecomp emit    <file> <outdir> [prefix] [--split N]\n"
         "  allegrexrecomp decrypt <file> [--keys <path>]\n"
         "  allegrexrecomp kirk1   <file> [out] [--keys <path>]\n"
         "\n"
@@ -723,7 +723,7 @@ static int cmd_funcs(const char *path, int list) {
 
 /* ---- the emitter --------------------------------------------------------- */
 
-static int cmd_emit(const char *path, const char *outdir, const char *prefix) {
+static int cmd_emit(const char *path, const char *outdir, const char *prefix, int split) {
     psp_blob b;
     elf_info e;
     a_analysis an;
@@ -756,6 +756,7 @@ static int cmd_emit(const char *path, const char *outdir, const char *prefix) {
     o.module = module;
     o.imports = imp;
     o.nimports = nimp;
+    o.split = split;
 
     printf("module:     %s\n", module);
     printf("functions:  %d\n", an.nfuncs);
@@ -992,7 +993,10 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "funcs"))   return cmd_funcs(argv[2], argc > 3 && !strcmp(argv[3], "--list"));
     if (!strcmp(cmd, "emit")) {
         if (argc < 4) return usage();
-        return cmd_emit(argv[2], argv[3], argc > 4 ? argv[4] : NULL);
+        int split = 0, npos = argc;
+        for (int i = 4; i < argc; i++)
+            if (!strcmp(argv[i], "--split") && i + 1 < argc) { split = atoi(argv[i + 1]); npos = i; break; }
+        return cmd_emit(argv[2], argv[3], npos > 4 ? argv[4] : NULL, split);
     }
     if (!strcmp(cmd, "extract")) {
         if (argc < 5) return usage();
