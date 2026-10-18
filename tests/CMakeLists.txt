@@ -16,6 +16,10 @@ add_test(NAME container COMMAND test_container)
 
 # Published standard vectors only (FIPS-197, SP 800-38A, RFC 4493) — no PSP
 # key material, no game data.
+add_executable(test_elf_exec test_elf_exec.c)
+target_link_libraries(test_elf_exec PRIVATE allegrex_core)
+add_test(NAME elf_exec COMMAND test_elf_exec)
+
 add_executable(test_crypto test_crypto.c)
 target_link_libraries(test_crypto PRIVATE allegrex_core)
 add_test(NAME crypto COMMAND test_crypto)

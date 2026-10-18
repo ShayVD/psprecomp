@@ -145,6 +145,13 @@ typedef struct {
     /* .rodata.sceModuleInfo — exports, imports and $gp. */
     uint32_t modinfo_addr, modinfo_offset, modinfo_size;
 
+    /* Address ranges [exec_lo, exec_hi) of SHF_EXECINSTR (flag 0x4) sections
+     * with SHT_PROGBITS, excluding the import-stub section (.sceStub.text).
+     * Filled when section headers survive; nexec == 0 means "unknown, fall
+     * back to text_addr/text_size". */
+    int      nexec;
+    uint32_t exec_lo[16], exec_hi[16];
+
     int      nsections;
     /* Kept so the relocation tables can be re-walked without re-deriving
      * where the section header table is. */

@@ -454,6 +454,17 @@ static int cmd_cover(const char *path) {
 
 /* ---- function discovery -------------------------------------------------- */
 
+/* Is `p` inside code? Uses the executable sections when the section headers
+ * survived, otherwise the .text range. */
+static int seed_in_code(const elf_info *e, uint32_t p) {
+    if (e->nexec > 0) {
+        for (int i = 0; i < e->nexec; i++)
+            if (p >= e->exec_lo[i] && p < e->exec_hi[i]) return 1;
+        return 0;
+    }
+    return p >= e->text_addr && p < e->text_addr + e->text_size;
+}
+
 /* Load a decrypted module and run discovery over it. On success the caller
  * owns both `b` (psp_blob_free) and `an` (a_analysis_free). Shared by `funcs`
  * and `emit`, which differ only in what they do with the result. */
@@ -551,16 +562,13 @@ static int load_and_discover(const char *path, psp_blob *b, elf_info *e,
                                             seeds + nseeds, avail);
                 if (nptr > avail) nptr = avail;
                 /* A heuristic pointer is only trusted as a *code* seed if it
-                 * lands in .text (or .init, which crt0 reaches by address).
-                 * Pointers into .rodata/.data are strings, tables and
-                 * vtables-of-data, and seeding them produced thousands of
-                 * "functions" made of data. */
+                 * lands in an executable section. Pointers into .rodata/.data
+                 * are strings, tables and other read-only data, and seeding
+                 * them produced thousands of "functions" made of data. */
                 int kept = 0;
                 for (int i = 0; i < nptr; i++) {
                     uint32_t p = seeds[nseeds + i];
-                    int in_text = p >= e->text_addr && p < e->text_addr + e->text_size;
-                    int is_init = p == e->seg[0].addr;
-                    if (in_text || is_init) seeds[nseeds + kept++] = p;
+                    if (seed_in_code(e, p)) seeds[nseeds + kept++] = p;
                 }
                 nptr = kept;
                 nseeds += nptr;

@@ -325,10 +325,20 @@ int elf_parse(const uint8_t *d, size_t len, elf_info *out) {
         uint32_t size    = rd32(d + sh + 20);
         if (nameoff >= strsz) continue;
 
+        uint32_t sh_type  = rd32(d + sh + 4);
+        uint32_t sh_flags = rd32(d + sh + 8);
         const char *name = (const char *)(d + stroff + nameoff);
         /* The name table is bounded above, but a missing terminator would let
          * strcmp run past it; cap the comparison length instead. */
         size_t avail = strsz - nameoff;
+
+        /* Every executable PROGBITS section except the import stubs. */
+        if (sh_type == 1 && (sh_flags & 0x4) && size && out->nexec < 16 &&
+            !(avail > 13 && strncmp(name, ".sceStub.text", 13) == 0)) {
+            out->exec_lo[out->nexec] = addr;
+            out->exec_hi[out->nexec] = addr + size;
+            out->nexec++;
+        }
 
         if (avail > 5 && strncmp(name, ".text", 6) == 0) {
             if ((size_t)off + size <= len) {
