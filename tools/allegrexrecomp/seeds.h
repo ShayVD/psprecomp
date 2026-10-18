@@ -1,8 +1,9 @@
 /* Extra discovery seeds from a file: one address per line, hex with a 0x
- * prefix ("0x08A8BE6C") or plain decimal (a leading zero does not mean octal).
- * '#' to end of line is a comment, blank lines are ignored, lines are at most
- * 255 characters. khbbs generates this from its bbs.toml; any project can
- * write one by hand. */
+ * prefix ("0x08A8BE6C") or plain decimal. A decimal with a leading zero and
+ * more digits ("08804040") is refused as ambiguous; there is no octal.
+ * '#' to end of line is a comment, blank lines are ignored, lines are up to
+ * 1023 characters (not counting the newline). khbbs generates this from its
+ * bbs.toml; any project can write one by hand. */
 #ifndef ALLEGREX_SEEDS_H
 #define ALLEGREX_SEEDS_H
 

@@ -6,12 +6,16 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Parse one token: 0x/0X + hex digits, or decimal digits. No sign, no octal,
- * nothing after it. Returns 0 and the value, or -1. */
-static int parse_addr(const char *p, uint32_t *out) {
+/* Parse one token: 0x/0X + hex digits, or decimal digits. No sign, nothing
+ * after it. A decimal token with a leading zero and more digits ("08804040")
+ * is almost certainly hex missing its 0x and is refused as ambiguous
+ * (*ambiguous set). Returns 0 and the value, or -1. */
+static int parse_addr(const char *p, uint32_t *out, int *ambiguous) {
     int base = 10;
+    *ambiguous = 0;
     if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) { base = 16; p += 2; }
     if (!*p) return -1;
+    if (base == 10 && p[0] == '0' && p[1]) { *ambiguous = 1; return -1; }
     unsigned long long v = 0;
     for (; *p; p++) {
         int d;
@@ -34,15 +38,21 @@ int a_read_seed_file(const char *path, uint32_t **out, int *n) {
 
     uint32_t *v = NULL;
     int cnt = 0, cap = 0, lineno = 0, rc = 0;
-    char line[256];
+    char line[1024];
     while (fgets(line, sizeof line, f)) {
         lineno++;
-        /* No newline and not at end of file: the line did not fit. Without
-         * this check the rest of it would be read as a line of its own. */
-        if (!strchr(line, '\n') && !feof(f)) {
-            fprintf(stderr, "%s:%d: line too long\n", path, lineno);
-            rc = -1;
-            break;
+        /* A full buffer with no newline means the line may not have fit.
+         * Without this check the rest of it would be read as a line of its
+         * own. Peek at what follows: end of file or the newline itself means
+         * the line was exactly full, which is fine. A short read without a
+         * newline is the last line (or a read error, checked below). */
+        if (!strchr(line, '\n') && strlen(line) == sizeof line - 1) {
+            int c = fgetc(f);
+            if (c != EOF && c != '\n') {
+                fprintf(stderr, "%s:%d: line too long\n", path, lineno);
+                rc = -1;
+                break;
+            }
         }
         char *hash = strchr(line, '#');
         if (hash) *hash = '\0';
@@ -54,8 +64,13 @@ int a_read_seed_file(const char *path, uint32_t **out, int *n) {
         if (*p == '\0') continue;
 
         uint32_t val;
-        if (parse_addr(p, &val) != 0) {
-            fprintf(stderr, "%s:%d: not an address: \"%s\"\n", path, lineno, p);
+        int ambiguous;
+        if (parse_addr(p, &val, &ambiguous) != 0) {
+            if (ambiguous)
+                fprintf(stderr, "%s:%d: ambiguous leading zero (use 0x for hex): '%s'\n",
+                        path, lineno, p);
+            else
+                fprintf(stderr, "%s:%d: not an address: \"%s\"\n", path, lineno, p);
             rc = -1;
             break;
         }
