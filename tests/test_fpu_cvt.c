@@ -26,6 +26,12 @@ int main(void) {
     eq(-2147483648.0f, 1, INT32_MIN, "-2^31 is exact");
     eq(1e10, 0, INT32_MAX, "big positive");
     eq(-1e10, 0, INT32_MIN, "big negative");
+    eq(2147483647.5, 1, INT32_MAX, "trunc just inside 2^31");
+    eq(-2147483648.5, 1, INT32_MIN, "trunc just inside -2^31-1");
+    eq(2147483648.0, 1, INT32_MAX, "trunc 2^31 (double)");
+    eq(-2147483649.0, 1, INT32_MIN, "trunc -2^31-1 (double)");
+    eq(-2147483648.0, 1, INT32_MIN, "trunc -2^31 (double)");
+    eq(-0.9, 1, 0, "trunc -0.9");
     eq(NAN, 0, INT32_MAX, "NaN");
     eq(INFINITY, 3, INT32_MAX, "+inf");
     eq(-INFINITY, 2, INT32_MIN, "-inf");

@@ -258,6 +258,9 @@ static inline int psp_fcmp(unsigned cond, float a, float b) {
  * flush-to-zero VFPU/FPU or a Vita host with FPSCR.FZ set would differ. */
 static inline int32_t psp_cvt_w(double x, int rm) {
     if (isnan(x)) return INT32_MAX;               /* not x != x: survives -ffinite-math-only */
+    /* Fast path for trunc (the common case): inside this open interval the
+     * truncated value is representable, so the cast is defined. */
+    if ((rm & 3) == 1 && x > -2147483649.0 && x < 2147483648.0) return (int32_t)x;
     double r;
     switch (rm & 3) {
     case 1:  r = x < 0 ? ceil(x) : floor(x); break;

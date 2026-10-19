@@ -53,6 +53,12 @@ target_include_directories(psprecomp PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
+# recomp_rt.h and the VFPU use floor/ceil/fmod; libm is implicit on macOS and
+# MSVC, not on Linux.
+if(NOT MSVC AND NOT APPLE)
+    target_link_libraries(psprecomp PUBLIC m)
+endif()
+
 # PSP floats are never fused: a*b+c rounds twice on the Allegrex and the VFPU.
 # Clang contracts within expressions by default, which changes results.
 if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")

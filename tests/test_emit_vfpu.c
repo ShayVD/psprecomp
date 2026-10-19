@@ -161,7 +161,7 @@ int main(void) {
         static const struct { uint32_t word; a_op op; } F[] = {
             { 0x4600100Cu, A_ROUND_W_S }, { 0x4600100Du, A_TRUNC_W_S },
             { 0x4600100Eu, A_CEIL_W_S },  { 0x4600100Fu, A_FLOOR_W_S },
-            { 0x46001024u, A_CVT_W_S },
+            { 0x46001024u, A_CVT_W_S }, { 0x460010CDu, A_TRUNC_W_S },
         };
         for (size_t i = 0; i < sizeof F / sizeof F[0]; i++) {
             a_insn d;
@@ -176,6 +176,7 @@ int main(void) {
     expect(0x4600100Eu, "psp_cvt_w(psp_cpu.f[2], 2)");     /* ceil.w.s */
     expect(0x4600100Fu, "psp_cvt_w(psp_cpu.f[2], 3)");     /* floor.w.s */
     expect(0x46001024u, "psp_cvt_w(psp_cpu.f[2], (int)(psp_cpu.fcr31 & 3))");   /* cvt.w.s */
+    expect(0x460010CDu, "psp_cpu.f[3] = psp_bits_to_f32((uint32_t)psp_cvt_w(psp_cpu.f[2], 1));");  /* trunc.w.s $f3, $f2 */
     reject(0x4600100Du, "(int32_t)psp_cpu.f[");            /* no raw C cast */
     reject(0x46001024u, "(int32_t)psp_cpu.f[");
 

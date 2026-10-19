@@ -373,9 +373,9 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
         fprintf(f, "%spsp_cpu.f[%u] = (float)(int32_t)psp_f32_to_bits(psp_cpu.f[%u]);\n",
                 ind, in->fd, in->fs); return;
     /* Float to word. Rounding mode as in FCR31 (0 nearest, 1 zero, 2 up,
-     * 3 down); cvt.w.s uses the current mode. psp_cvt_w saturates the way
-     * the PSP does and never casts an out-of-range float, which C leaves
-     * undefined. */
+     * 3 down); cvt.w.s uses the current mode. psp_cvt_w saturates as we read
+     * the PSP does (P2's oracle verifies) and never casts an out-of-range
+     * float, which C leaves undefined. */
     case A_ROUND_W_S: case A_TRUNC_W_S: case A_CEIL_W_S: case A_FLOOR_W_S: case A_CVT_W_S: {
         const char *rm = in->op == A_ROUND_W_S ? "0" : in->op == A_TRUNC_W_S ? "1"
                        : in->op == A_CEIL_W_S  ? "2" : in->op == A_FLOOR_W_S ? "3"
