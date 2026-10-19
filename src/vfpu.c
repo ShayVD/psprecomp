@@ -20,6 +20,7 @@ void psp_vfpu_reset(void) {
     memset(g_prefix, 0, sizeof g_prefix);
     memset(g_prefix_set, 0, sizeof g_prefix_set);
     g_traps = 0;
+    vfpu_rnd_reset();
 }
 
 void psp_vfpu_set_prefix(int which, uint32_t value) {

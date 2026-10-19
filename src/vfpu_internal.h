@@ -28,6 +28,8 @@ void vfpu_end(void);
 int vfpu_no_prefix(const char *what);
 /* Sine and cosine of an angle in quarter turns; exact at whole quarter turns. */
 void vfpu_sincos_q(float a, float *s, float *c);
+/* Restart the vrnd* generator from its fixed seed (psp_vfpu_reset calls it). */
+void vfpu_rnd_reset(void);
 /* Report through the trap handler. */
 void vfpu_trap(const char *what);
 

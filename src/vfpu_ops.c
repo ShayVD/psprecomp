@@ -215,3 +215,148 @@ bad:
     vfpu_end();
     vfpu_trap("vpack width");
 }
+
+/* ---- VFPU9 lane ops ------------------------------------------------------- */
+
+/* Prefix policy, as for the conversions. The game has one vfad with a pending
+ * vpfxs (a sum with lanes negated) and one vocp under a vpfxd; no other
+ * vfad/vavg/vocp/vsocp/vbfy/vsrt/vsgn site has any prefix pending (counted in
+ * the generated code). So:
+ *  - vpfxd applies as everywhere (vfpu_write): mask, and saturation.
+ *  - vpfxs applies to vfad only, element-wise on its source lanes. UNVERIFIED
+ *    on hardware; it is what the game's one site needs.
+ *  - any other vpfxs, and every vpfxt (none of these ops has a vt), is not
+ *    ours to interpret: trap, write nothing, consume the prefixes. */
+static int lane_prefix_trap(int op) {
+    if (!vfpu_prefix_is_set(PSP_VPFX_T) && !(vfpu_prefix_is_set(PSP_VPFX_S) && op != PSP_VL_FAD)) return 0;
+    vfpu_end();
+    vfpu_trap("vlane with vpfxs/vpfxt");
+    return 1;
+}
+
+static float lmin(float a, float b) { return a < b ? a : b; }
+static float lmax(float a, float b) { return a > b ? a : b; }
+static float lsat0(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
+
+/* UNVERIFIED on hardware, all of it: the order of the sum (left to right,
+ * starting from lane 0 so that -0 survives), vavg as sum / n rather than
+ * sum * (1/n), vsocp's saturation, the vsrt/vbfy lane pairings and vsgn
+ * giving 0 for NaN and for -0. Min and max here return the second operand
+ * when either is NaN. All sources are read before anything is written, so a
+ * destination overlapping the source is safe. */
+void psp_vlane(int op, uint32_t vd, uint32_t vs, int size) {
+    if (lane_prefix_trap(op)) return;
+    if (size < 1 || size > 4) goto bad;
+    float s[4], d[4] = { 0, 0, 0, 0 };
+    int dn = size;
+    vfpu_read(PSP_VPFX_S, vs, size, s);
+    switch (op) {
+    case PSP_VL_FAD: case PSP_VL_AVG: {
+        float sum = s[0];
+        for (int i = 1; i < size; i++) sum += s[i];
+        d[0] = op == PSP_VL_AVG ? sum / (float)size : sum;
+        dn = 1;
+        break;
+    }
+    case PSP_VL_OCP:
+        for (int i = 0; i < size; i++) d[i] = 1.0f - s[i];
+        break;
+    case PSP_VL_SOCP:
+        if (size > 2) goto bad;
+        dn = size * 2;
+        for (int i = 0; i < size; i++) { d[2 * i] = lsat0(1.0f - s[i]); d[2 * i + 1] = lsat0(s[i]); }
+        break;
+    case PSP_VL_BFY1:
+        if (size != 2 && size != 4) goto bad;
+        for (int i = 0; i < size; i += 2) { d[i] = s[i] + s[i + 1]; d[i + 1] = s[i] - s[i + 1]; }
+        break;
+    case PSP_VL_BFY2:
+        if (size != 4) goto bad;
+        d[0] = s[0] + s[2]; d[1] = s[1] + s[3]; d[2] = s[0] - s[2]; d[3] = s[1] - s[3];
+        break;
+    case PSP_VL_SRT1:
+        if (size != 4) goto bad;
+        d[0] = lmin(s[0], s[1]); d[1] = lmax(s[0], s[1]); d[2] = lmin(s[2], s[3]); d[3] = lmax(s[2], s[3]);
+        break;
+    case PSP_VL_SRT2:
+        if (size != 4) goto bad;
+        d[0] = lmin(s[0], s[3]); d[1] = lmin(s[1], s[2]); d[2] = lmax(s[1], s[2]); d[3] = lmax(s[0], s[3]);
+        break;
+    case PSP_VL_SRT3:
+        if (size != 4) goto bad;
+        d[0] = lmax(s[0], s[1]); d[1] = lmin(s[0], s[1]); d[2] = lmax(s[2], s[3]); d[3] = lmin(s[2], s[3]);
+        break;
+    case PSP_VL_SRT4:
+        if (size != 4) goto bad;
+        d[0] = lmax(s[0], s[3]); d[1] = lmax(s[1], s[2]); d[2] = lmin(s[1], s[2]); d[3] = lmin(s[0], s[3]);
+        break;
+    case PSP_VL_SGN:
+        for (int i = 0; i < size; i++) d[i] = s[i] > 0.0f ? 1.0f : s[i] < 0.0f ? -1.0f : 0.0f;
+        break;
+    default:
+        goto bad;
+    }
+    vfpu_write(vd, dn, d);
+    vfpu_end();
+    return;
+bad:
+    vfpu_end();
+    vfpu_trap("vlane width");
+}
+
+/* ---- random numbers -------------------------------------------------------- */
+
+/* Not the PSP's generator, which is unknown: xorshift32 from a fixed seed. What
+ * matters is that a run is reproducible. UNVERIFIED against hardware in every
+ * respect except the ranges, which are the documented ones. */
+#define RND_SEED 0x2F6B4C1Du
+static uint32_t g_rnd = RND_SEED;
+
+void vfpu_rnd_reset(void) { g_rnd = RND_SEED; }
+
+static uint32_t rnd_next(void) {
+    uint32_t x = g_rnd;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    return g_rnd = x;
+}
+
+/* vrnds reads vs, the other three have no source: a vpfxs or vpfxt has
+ * nothing to apply to (and the game has none pending at its vrnd* sites), so
+ * it traps. A vpfxd applies to the destination of the other three. */
+static int rnd_prefix_trap(void) {
+    if (!vfpu_prefix_is_set(PSP_VPFX_S) && !vfpu_prefix_is_set(PSP_VPFX_T)) return 0;
+    vfpu_end();
+    vfpu_trap("vrnd with vpfxs/vpfxt");
+    return 1;
+}
+
+void psp_vrnds(uint32_t vs) {
+    if (rnd_prefix_trap()) return;
+    float s[4];
+    vfpu_read_raw(vs, 1, s);
+    const uint32_t b = psp_f32_to_bits(s[0]);
+    g_rnd = b ? b : RND_SEED;                 /* xorshift must not start at 0 */
+    vfpu_end();
+}
+
+void psp_vrnd(int kind, uint32_t vd, int size) {
+    if (rnd_prefix_trap()) return;
+    const int n = vfpu_width(size);
+    uint32_t d[4] = { 0, 0, 0, 0 };
+    for (int i = 0; i < n; i++) {
+        const uint32_t r = rnd_next();
+        d[i] = kind == PSP_VR_F1 ? (0x3F800000u | (r >> 9))      /* [1, 2) */
+             : kind == PSP_VR_F2 ? (0x40000000u | (r >> 9))      /* [2, 4) */
+             : r;
+    }
+    if (kind == PSP_VR_F1 || kind == PSP_VR_F2) {
+        float f[4];
+        for (int i = 0; i < n; i++) f[i] = psp_bits_to_f32(d[i]);
+        vfpu_write(vd, n, f);                                  /* float results: a saturation mode applies */
+    } else {
+        vfpu_write_bits(vd, n, d);
+    }
+    vfpu_end();
+}

@@ -126,6 +126,32 @@ int main(void) {
     reject(0xD2208180u, "psp_vunary");                  /* no longer the scale-less unary path */
     reject(0xD2908180u, "psp_vunary");
 
+    /* VFPU9 lane ops and vrnd* (pspas: vfad.q S000, C010 and the like), and
+     * vdiv's operand order (vd 0, vs 32, vt 64, size 1). */
+    expect(0xD0468180u, "psp_vlane(PSP_VL_FAD, 0, 1, 4);");
+    expect(0xD0448180u, "psp_vlane(PSP_VL_OCP, 0, 1, 4);");
+    expect(0xD0428180u, "psp_vlane(PSP_VL_BFY1, 0, 1, 4);");
+    expect(0xD0220000u, "psp_vrnd(PSP_VR_F1, 0, 1);");          /* vrndf1.s S000 */
+    expect(0xD0238080u, "psp_vrnd(PSP_VR_F2, 0, 4);");          /* vrndf2.q C000 */
+    expect(0x63C02000u, "psp_vdiv(0, 32, 64, 1);");             /* vdiv.s S000, S001, S002 */
+    /* The others, from decode.c's VFPU9/VFPU7 layouts: the vs and size fields
+     * must reach the call, and vsocp keeps its source width (the runtime
+     * doubles it). */
+    expect(0xD0450100u, "psp_vlane(PSP_VL_SOCP, 0, 1, 1);");     /* vsocp.s */
+    expect(0xD0450180u, "psp_vlane(PSP_VL_SOCP, 0, 1, 2);");     /* vsocp.p */
+    expect(0xD0478180u, "psp_vlane(PSP_VL_AVG, 0, 1, 4);");
+    expect(0xD0438180u, "psp_vlane(PSP_VL_BFY2, 0, 1, 4);");
+    expect(0xD0408180u, "psp_vlane(PSP_VL_SRT1, 0, 1, 4);");
+    expect(0xD0418180u, "psp_vlane(PSP_VL_SRT2, 0, 1, 4);");
+    expect(0xD0488180u, "psp_vlane(PSP_VL_SRT3, 0, 1, 4);");
+    expect(0xD0498180u, "psp_vlane(PSP_VL_SRT4, 0, 1, 4);");
+    expect(0xD04A8180u, "psp_vlane(PSP_VL_SGN, 0, 1, 4);");
+    expect(0xD0200100u, "psp_vrnds(1);");
+    expect(0xD0218080u, "psp_vrnd(PSP_VR_I, 0, 4);");
+    expect(0xD0210000u, "psp_vrnd(PSP_VR_I, 0, 1);");
+    expect(0xD0228080u, "psp_vrnd(PSP_VR_F1, 0, 4);");
+    expect(0xD0230000u, "psp_vrnd(PSP_VR_F2, 0, 1);");
+
     /* Pipeline control. Only the canonical vsync immediate is a no-op: the
      * decoder turns every other 0xFFFFxxxx into vsync, and a data word
      * reached as code must stay loud. */
@@ -190,6 +216,21 @@ int main(void) {
             { 0xD0390100u, A_VC2I,  "psp_vpack("  },
             { 0xD03A0100u, A_VUS2I, "psp_vpack("  },
             { 0xD03B0100u, A_VS2I,  "psp_vpack("  },
+            { 0xD0468180u, A_VFAD,  "psp_vlane("  },
+            { 0xD0478180u, A_VAVG,  "psp_vlane("  },
+            { 0xD0448180u, A_VOCP,  "psp_vlane("  },
+            { 0xD0458180u, A_VSOCP, "psp_vlane("  },
+            { 0xD0428180u, A_VBFY1, "psp_vlane("  },
+            { 0xD0438180u, A_VBFY2, "psp_vlane("  },
+            { 0xD0408180u, A_VSRT1, "psp_vlane("  },
+            { 0xD0418180u, A_VSRT2, "psp_vlane("  },
+            { 0xD0488180u, A_VSRT3, "psp_vlane("  },
+            { 0xD0498180u, A_VSRT4, "psp_vlane("  },
+            { 0xD04A8180u, A_VSGN,  "psp_vlane("  },
+            { 0xD0200100u, A_VRNDS, "psp_vrnds("  },
+            { 0xD0210000u, A_VRNDI, "psp_vrnd("   },
+            { 0xD0220000u, A_VRNDF1,"psp_vrnd("   },
+            { 0xD0238080u, A_VRNDF2,"psp_vrnd("   },
         };
         for (size_t i = 0; i < sizeof T / sizeof T[0]; i++) {
             a_insn d;

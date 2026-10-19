@@ -478,6 +478,38 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
         break;
     }
 
+    /* VFPU9 lane ops and the random-number ops. The width passed is the
+     * source's (vsocp's result is twice it, vfad/vavg's is one lane); the
+     * runtime works out the destination. */
+    case A_VFAD: case A_VAVG: case A_VOCP: case A_VSOCP: case A_VBFY1: case A_VBFY2:
+    case A_VSRT1: case A_VSRT2: case A_VSRT3: case A_VSRT4: case A_VSGN: {
+        static const struct { a_op op; const char *sel; } L[] = {
+            { A_VFAD, "PSP_VL_FAD" },   { A_VAVG, "PSP_VL_AVG" },   { A_VOCP, "PSP_VL_OCP" },
+            { A_VSOCP, "PSP_VL_SOCP" }, { A_VBFY1, "PSP_VL_BFY1" }, { A_VBFY2, "PSP_VL_BFY2" },
+            { A_VSRT1, "PSP_VL_SRT1" }, { A_VSRT2, "PSP_VL_SRT2" }, { A_VSRT3, "PSP_VL_SRT3" },
+            { A_VSRT4, "PSP_VL_SRT4" }, { A_VSGN, "PSP_VL_SGN" },
+        };
+        for (size_t k = 0; k < sizeof L / sizeof L[0]; k++)
+            if (L[k].op == in->op) {
+                emit_vcall_pc(f, ind, in);
+                fprintf(f, "%spsp_vlane(%s, %u, %u, %u);\n", ind, L[k].sel, in->vd, in->vs, in->vsize);
+                return;
+            }
+        break;
+    }
+    case A_VRNDS:
+        emit_vcall_pc(f, ind, in);
+        fprintf(f, "%spsp_vrnds(%u);\n", ind, in->vs); return;
+    case A_VRNDI:
+        emit_vcall_pc(f, ind, in);
+        fprintf(f, "%spsp_vrnd(PSP_VR_I, %u, %u);\n", ind, in->vd, in->vsize); return;
+    case A_VRNDF1:
+        emit_vcall_pc(f, ind, in);
+        fprintf(f, "%spsp_vrnd(PSP_VR_F1, %u, %u);\n", ind, in->vd, in->vsize); return;
+    case A_VRNDF2:
+        emit_vcall_pc(f, ind, in);
+        fprintf(f, "%spsp_vrnd(PSP_VR_F2, %u, %u);\n", ind, in->vd, in->vsize); return;
+
     /* Constant generators. These carry no source operand: what they produce is
      * encoded in the register number (vidt) or an index (vcst). */
     case A_VIDT:

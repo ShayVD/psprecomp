@@ -102,6 +102,20 @@ enum { PSP_VP_I2UC, PSP_VP_I2C, PSP_VP_I2US, PSP_VP_I2S,
        PSP_VP_UC2I, PSP_VP_C2I, PSP_VP_US2I, PSP_VP_S2I };
 void psp_vpack(int op, uint32_t vd, uint32_t vs, int size);
 
+/* VFPU9 lane ops. `size` is the source width: vfad/vavg write one lane,
+ * vsocp twice `size` lanes, the rest `size`. Prefixes: see vfpu_ops.c. */
+enum { PSP_VL_FAD, PSP_VL_AVG, PSP_VL_OCP, PSP_VL_SOCP, PSP_VL_BFY1, PSP_VL_BFY2,
+       PSP_VL_SRT1, PSP_VL_SRT2, PSP_VL_SRT3, PSP_VL_SRT4, PSP_VL_SGN };
+void psp_vlane(int op, uint32_t vd, uint32_t vs, int size);
+
+/* Random numbers: a deterministic xorshift32, not the PSP's generator (which is
+ * unknown), restarted from a fixed seed by psp_vfpu_reset. vrnds seeds it from
+ * the bits of vs; vrndi writes the raw draws, vrndf1 floats in [1, 2), vrndf2
+ * floats in [2, 4). */
+enum { PSP_VR_I, PSP_VR_F1, PSP_VR_F2 };
+void psp_vrnds(uint32_t vs);
+void psp_vrnd(int kind, uint32_t vd, int size);
+
 /* Matrix ops that need no multiply: identity, zero, one, and copy. `size` is
  * the matrix order (2, 3 or 4). */
 void psp_vmidt(uint32_t vd, int size);
