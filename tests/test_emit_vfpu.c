@@ -125,6 +125,11 @@ int main(void) {
     expect(0x6F028180u, "psp_vsge(0, 1, 2, 4);");
     expect(0x6F828180u, "psp_vslt(0, 1, 2, 4);");
 
+    /* vrexp2 (VFPU4 rt 0x1C) is a vunary op like the rest. vabs.q C000, C010
+     * (rt 0x01) beside it. Words from decode.c's layout. */
+    expect(0xD01C8180u, "psp_vunary(PSP_VU_REXP2, 0, 1, 4);");
+    expect(0xD0018180u, "psp_vunary(PSP_VU_ABS, 0, 1, 4);");
+
     /* VFPU6 transforms. The order is in bits 25..23 (1/2/3: 2/3/4) and the
      * width is the vector's: as wide as the order is vtfmN, one lane narrower
      * the homogeneous vhtfmN, which adds the matrix's last column. Anything
@@ -256,6 +261,7 @@ int main(void) {
             { 0x65008080u, A_VSCL,  "psp_vscl("   },
             { 0x6C008080u, A_VCMP,  "psp_vcmp("   },
             { 0xD0008080u, A_VMOV,  "psp_vunary(" },
+            { 0xD01C8180u, A_VREXP2,"psp_vunary(" },
             { 0xD0038080u, A_VIDT,  "psp_vidt("   },
             { 0xD0690000u, A_VCST,  "psp_vcst("   },
             { 0xDF000001u, A_VIIM,  "psp_vimm("   },

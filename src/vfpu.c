@@ -306,7 +306,9 @@ void psp_vunary(int op, uint32_t vd, uint32_t vs, int size) {
         float r;
         switch (op) {
         case PSP_VU_MOV:  r = a;            break;
-        case PSP_VU_ABS:  r = a < 0 ? -a : a; break;
+        /* On the bits, as the prefix abs: -0 becomes +0 and a NaN keeps its
+         * payload. */
+        case PSP_VU_ABS:  r = psp_bits_to_f32(psp_f32_to_bits(a) & 0x7FFFFFFFu); break;
         case PSP_VU_NEG:  r = -a;           break;
         case PSP_VU_ZERO: r = 0.0f;         break;
         case PSP_VU_ONE:  r = 1.0f;         break;

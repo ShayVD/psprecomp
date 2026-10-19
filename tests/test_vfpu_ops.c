@@ -1157,6 +1157,25 @@ static void test_missing_operand_prefixes(void) {
     psp_vfpu_reset();
 }
 
+/* vabs clears the sign bit, as the prefix abs does: -0 becomes +0 and a
+ * negative NaN keeps its payload. vrexp2 is 1 / 2^x. */
+static void test_vabs_bits_vrexp2(void) {
+    const uint32_t in[4] = { 0x80000000u, 0xFFC01234u, 0xC0400000u, 0x3F800000u };   /* -0, -NaN, -3, 1 */
+    uint32_t out[4];
+    set_bits(0x01u, 4, in);
+    psp_vunary(PSP_VU_ABS, 0x00u, 0x01u, 4);
+    get_bits(0x00u, 4, out);
+    CHECK(out[0] == 0x00000000u && out[1] == 0x7FC01234u && out[2] == 0x40400000u && out[3] == 0x3F800000u,
+          "vabs bits: 0x%08X 0x%08X 0x%08X 0x%08X", out[0], out[1], out[2], out[3]);
+    const float x[4] = { 0.0f, 1.0f, -2.0f, 3.0f };
+    float o[4];
+    set4(0x01u, 4, x);
+    psp_vunary(PSP_VU_REXP2, 0x00u, 0x01u, 4);
+    get(0x00u, 4, o);
+    CHECK(o[0] == 1.0f && o[1] == 0.5f && o[2] == 4.0f && o[3] == 0.125f,
+          "vrexp2: %g %g %g %g", o[0], o[1], o[2], o[3]);
+}
+
 int main(void) {
     psp_vfpu_reset();
     test_moves();
@@ -1177,6 +1196,7 @@ int main(void) {
     test_lane_nan_ties();
     test_random();
     test_missing_operand_prefixes();
+    test_vabs_bits_vrexp2();
     printf("%s\n", failures ? "test_vfpu_ops: FAILED" : "test_vfpu_ops: ok");
     return failures ? 1 : 0;
 }
