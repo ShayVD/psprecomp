@@ -1,6 +1,7 @@
 /* VFPU and FPU emission: one instruction per function, checked as text.
  * Synthetic code only, no game data. Later tasks add cases here. */
 #include "analyze.h"
+#include "decode.h"
 #include "emit.h"
 
 #include <stdio.h>
@@ -84,10 +85,8 @@ int main(void) {
     expect(0x49020003u, "!((psp_cpu.vfpu_cc >> 0) & 1)");   /* bvfl 0 */
 
     /* A VFPU op that can trap stores its own address in psp_cpu.pc first, so
-     * the trap names the instruction. Loads, stores and prefixes cannot trap. */
-    expect_order(0x60008080u, "psp_cpu.pc = 0x08804000u;", "psp_vadd(0, 0, 0, 4);");
-    expect_order(0xF3838080u, "psp_cpu.pc = 0x08804000u;", "psp_vmidt(0, 4);");   /* vmidt.q M000 */
-    expect_order(0xD0690000u, "psp_cpu.pc = 0x08804000u;", "psp_vcst(0, 9, 1);");
+     * the trap names the instruction. The table test below covers every case
+     * in emit_simple that does it. Loads, stores and prefixes cannot trap. */
     reject(0xD8000000u, "psp_cpu.pc =");                     /* lv.q */
     reject(0xDC0000E4u, "psp_cpu.pc =");                     /* vpfxs */
 
@@ -113,12 +112,64 @@ int main(void) {
         if (strstr(src, "/* vsync */")) { printf("FAIL 0xFFFF0001: emitted as a no-op\n"); failures++; }
     }
 
-    /* The pc store comes from the call sites themselves; check each op
-     * family so a new case that forgets it is caught. Words are from the
-     * decoder tests (test_decode_vfpu.c) or built from the field layouts. */
-    expect_order(0x60008080u, "psp_cpu.pc =", "psp_vadd(");       /* binary */
-    expect_order(0xD0000080u, "psp_cpu.pc =", "psp_vunary(");     /* unary: vmov.q */
-    expect_order(0xF3838080u, "psp_cpu.pc =", "psp_vmidt(");      /* matrix */
+    /* One representative word per emit_simple case that calls emit_vcall_pc.
+     * The store must precede the runtime call. Each word is checked to decode
+     * to the intended op, so a wrong word fails here and not by silently
+     * testing something else. Words are built from decode.c's field layouts
+     * (not run through pspas): major opcode, then bits 25..23 (VFPU0/1/5/7
+     * families), or rs (VFPU4, bits 25..21) and rt (bits 20..16), or the
+     * VFPU6 rs group; 0x8080 is the quad size. */
+    {
+        static const struct { uint32_t word; a_op op; const char *call; } T[] = {
+            { 0x60008080u, A_VADD,  "psp_vadd("   },
+            { 0x60808080u, A_VSUB,  "psp_vsub("   },
+            { 0x64008080u, A_VMUL,  "psp_vmul("   },
+            { 0x63808080u, A_VDIV,  "psp_vdiv("   },
+            { 0x6D008080u, A_VMIN,  "psp_vmin("   },
+            { 0x6D808080u, A_VMAX,  "psp_vmax("   },
+            { 0x64808080u, A_VDOT,  "psp_vdot("   },
+            { 0x65008080u, A_VSCL,  "psp_vscl("   },
+            { 0x6C008080u, A_VCMP,  "psp_vcmp("   },
+            { 0xD0008080u, A_VMOV,  "psp_vunary(" },
+            { 0xD0038080u, A_VIDT,  "psp_vidt("   },
+            { 0xD0690000u, A_VCST,  "psp_vcst("   },
+            { 0xDF000001u, A_VIIM,  "psp_vimm("   },
+            { 0xDF800001u, A_VFIM,  "psp_vimm("   },
+            { 0xF0008080u, A_VMMUL, "psp_vmmul("  },
+            { 0xF1808080u, A_VTFM4, "psp_vtfm("   },
+            { 0xF2008080u, A_VMSCL, "psp_vmscl("  },
+            { 0xF3838080u, A_VMIDT, "psp_vmidt("  },
+            { 0xF3868080u, A_VMZERO,"psp_vmzero(" },
+            { 0xF3878080u, A_VMONE, "psp_vmone("  },
+            { 0xF3808080u, A_VMMOV, "psp_vmmov("  },
+        };
+        for (size_t i = 0; i < sizeof T / sizeof T[0]; i++) {
+            a_insn d;
+            memset(&d, 0, sizeof d);
+            a_decode(T[i].word, BASE, &d);
+            if (d.op != T[i].op) {
+                printf("FAIL 0x%08X: decodes to op %d, test expects %d\n",
+                       T[i].word, (int)d.op, (int)T[i].op);
+                failures++;
+                continue;
+            }
+            expect_order(T[i].word, "psp_cpu.pc = 0x08804000u;", T[i].call);
+        }
+    }
+
+    /* mfv to $zero is discarded; mfvc/mtvc (bit 7) are different ops and stay
+     * unimplemented. */
+    expect(0x48600001u, "*/\n    ;\n");   /* nothing but the disassembly comment */
+    reject(0x48600001u, "psp_mfv");
+    reject(0x48600001u, "psp_unimplemented");
+    {
+        const uint32_t w[2] = { 0x48640080u, 0x48E40080u };   /* mfvc, mtvc $a0 */
+        for (int i = 0; i < 2; i++)
+            if (!strstr(emit_one(w[i]), "psp_unimplemented")) {
+                printf("FAIL 0x%08X: mfvc/mtvc should be unimplemented\n", w[i]);
+                failures++;
+            }
+    }
 
     remove("./t_emit_vfpu_funcs.c");
     remove("./t_emit_vfpu_funcs.h");

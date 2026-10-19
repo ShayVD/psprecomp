@@ -127,11 +127,11 @@ static void emit_static_call(ectx *c, uint32_t target) {
 /* ---- one non-control-flow instruction ------------------------------------ */
 
 /* Nothing else maintains psp_cpu.pc, so a VFPU call stores its own address
- * first: a trap inside it (see vfpu_trap) then names this instruction. Every
- * case in emit_simple that emits a computing psp_v* call does it itself, so
- * the set cannot drift from the set of calls. Not covered, because they
- * cannot trap: the lv/sv loads and stores, the prefix setters, mfv/mtv (one
- * lane moved as bits, no prefix consulted) and the no-op pipeline ops. */
+ * first: a trap inside it (see vfpu_trap) then names this instruction. The
+ * store sits next to each computing psp_v* call in emit_simple, and the table
+ * test in tests/test_emit_vfpu.c guards that no case loses it. No store for
+ * what cannot trap: the lv/sv loads and stores, the prefix setters, mfv/mtv
+ * (one lane moved as bits, no prefix consulted) and the no-op pipeline ops. */
 static void emit_vcall_pc(FILE *f, const char *ind, const a_insn *in) {
     fprintf(f, "%spsp_cpu.pc = 0x%08Xu;\n", ind, in->addr);
 }
