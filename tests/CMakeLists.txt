@@ -106,3 +106,7 @@ add_test(NAME vfpu_prefix COMMAND test_vfpu_prefix)
 add_executable(test_vfpu_ops test_vfpu_ops.c)
 target_link_libraries(test_vfpu_ops PRIVATE psprecomp)
 add_test(NAME vfpu_ops COMMAND test_vfpu_ops)
+
+add_executable(test_fpu_cvt test_fpu_cvt.c)
+target_link_libraries(test_fpu_cvt PRIVATE psprecomp)
+add_test(NAME fpu_cvt COMMAND test_fpu_cvt)

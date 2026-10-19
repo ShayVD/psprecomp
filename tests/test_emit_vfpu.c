@@ -152,6 +152,33 @@ int main(void) {
     expect(0xD0228080u, "psp_vrnd(PSP_VR_F1, 0, 4);");
     expect(0xD0230000u, "psp_vrnd(PSP_VR_F2, 0, 1);");
 
+    /* FPU float-to-word. Words: COP1 fmt S (0x46000000) | fs 2 << 11 | fd 0 |
+     * funct (0x0C round, 0x0D trunc, 0x0E ceil, 0x0F floor, 0x24 cvt.w.s),
+     * from decode.c's layout; each is decoded below so a wrong word fails
+     * here instead of testing something else. No pc store: nothing here
+     * calls a psp_v* function. */
+    {
+        static const struct { uint32_t word; a_op op; } F[] = {
+            { 0x4600100Cu, A_ROUND_W_S }, { 0x4600100Du, A_TRUNC_W_S },
+            { 0x4600100Eu, A_CEIL_W_S },  { 0x4600100Fu, A_FLOOR_W_S },
+            { 0x46001024u, A_CVT_W_S },
+        };
+        for (size_t i = 0; i < sizeof F / sizeof F[0]; i++) {
+            a_insn d;
+            if (!a_decode(F[i].word, BASE, &d) || d.op != F[i].op) {
+                printf("FAIL 0x%08X: does not decode to the intended FPU op\n", F[i].word);
+                failures++;
+            }
+        }
+    }
+    expect(0x4600100Cu, "psp_cpu.f[0] = psp_bits_to_f32((uint32_t)psp_cvt_w(psp_cpu.f[2], 0));");  /* round.w.s */
+    expect(0x4600100Du, "psp_cvt_w(psp_cpu.f[2], 1)");     /* trunc.w.s */
+    expect(0x4600100Eu, "psp_cvt_w(psp_cpu.f[2], 2)");     /* ceil.w.s */
+    expect(0x4600100Fu, "psp_cvt_w(psp_cpu.f[2], 3)");     /* floor.w.s */
+    expect(0x46001024u, "psp_cvt_w(psp_cpu.f[2], (int)(psp_cpu.fcr31 & 3))");   /* cvt.w.s */
+    reject(0x4600100Du, "(int32_t)psp_cpu.f[");            /* no raw C cast */
+    reject(0x46001024u, "(int32_t)psp_cpu.f[");
+
     /* Pipeline control. Only the canonical vsync immediate is a no-op: the
      * decoder turns every other 0xFFFFxxxx into vsync, and a data word
      * reached as code must stay loud. */
