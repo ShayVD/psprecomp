@@ -25,6 +25,12 @@ static void pre_hook(uint32_t nid, const char *name, const uint32_t args[8], uin
     pre.ra = ra; pre.handled_before = handled; pre.n++;
 }
 
+static void swap_hook(uint32_t nid, const char *name, const uint32_t args[8], uint32_t ra) {
+    pre_hook(nid, name, args, ra);
+    psp_hle_set_pre_call(NULL);
+    psp_hle_set_trace(hook);
+}
+
 static void fake(void) {
     handled++;
     uint32_t r = psp_arg(0) + 1;
@@ -85,6 +91,17 @@ int main(void) {
     psp_hle_set_pre_call(NULL);
     psp_hle_call(0x109F50BCu);
     CHECK(pre.n == 3, "pre-call hook removed");
+
+    /* A pre-call hook may remove itself and install the trace hook, which
+     * then sees this call with its entry arguments. */
+    psp_hle_set_pre_call(swap_hook);
+    psp_cpu.r[PSP_REG_A0] = 77;
+    psp_hle_call(0x109F50BCu);
+    CHECK(pre.n == 4, "self-removing hook ran");
+    CHECK(seen.n == 4 && seen.args[0] == 77 && seen.ret == 78, "trace hook installed mid-call sees the call");
+    psp_hle_call(0x109F50BCu);
+    CHECK(pre.n == 4 && seen.n == 5, "self-removal took effect");
+    psp_hle_set_trace(NULL);
 
     printf("%s\n", failures ? "test_hle_trace: FAILED" : "test_hle_trace: ok");
     return failures ? 1 : 0;

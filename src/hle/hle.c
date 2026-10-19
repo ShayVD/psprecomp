@@ -110,11 +110,10 @@ void psp_hle_set_trace(psp_hle_trace_fn fn) { g_trace = fn; }
 void psp_hle_set_pre_call(psp_hle_pre_call_fn fn) { g_pre_call = fn; }
 
 void psp_hle_call(uint32_t nid) {
+    /* Always captured: a hook may install the trace hook mid-call. */
     uint32_t args[8], ra = psp_cpu.r[PSP_REG_RA];
-    if (g_trace || g_pre_call) {
-        for (int i = 0; i < 4; i++) args[i] = psp_cpu.r[PSP_REG_A0 + i];
-        for (int i = 0; i < 4; i++) args[4 + i] = psp_cpu.r[PSP_REG_T0 + i];
-    }
+    for (int i = 0; i < 4; i++) args[i] = psp_cpu.r[PSP_REG_A0 + i];
+    for (int i = 0; i < 4; i++) args[4 + i] = psp_cpu.r[PSP_REG_T0 + i];
     for (int i = 0; i < g_count; i++) {
         if (g_entry[i].nid == nid) {
             if (g_pre_call) g_pre_call(nid, g_entry[i].name, args, ra);

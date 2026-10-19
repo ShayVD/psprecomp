@@ -53,7 +53,13 @@ void psp_hle_set_trace(psp_hle_trace_fn fn);
 
 /* Optional observer called before the handler runs, for snapshots taken "just
  * before call K". Same `nid`, `name`, `args` and `ra` as the trace hook. It is
- * independent of the trace hook; both can be set. Pass NULL to remove. */
+ * independent of the trace hook; both can be set. Pass NULL to remove.
+ *
+ * Both hooks are plain globals, not thread-safe: set them and let them be
+ * called from the one emulation thread. A hook may install or remove hooks,
+ * itself included (the change applies from the next call, except that a trace
+ * hook installed before the handler returns sees this call). A hook must not
+ * call psp_hle_call. */
 typedef void (*psp_hle_pre_call_fn)(uint32_t nid, const char *name,
                                     const uint32_t args[8], uint32_t ra);
 void psp_hle_set_pre_call(psp_hle_pre_call_fn fn);
