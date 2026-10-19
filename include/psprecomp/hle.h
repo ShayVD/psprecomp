@@ -51,6 +51,13 @@ typedef void (*psp_hle_trace_fn)(uint32_t nid, const char *name,
                                  uint32_t ret_hi, uint32_t ra);
 void psp_hle_set_trace(psp_hle_trace_fn fn);
 
+/* Optional observer called before the handler runs, for snapshots taken "just
+ * before call K". Same `nid`, `name`, `args` and `ra` as the trace hook. It is
+ * independent of the trace hook; both can be set. Pass NULL to remove. */
+typedef void (*psp_hle_pre_call_fn)(uint32_t nid, const char *name,
+                                    const uint32_t args[8], uint32_t ra);
+void psp_hle_set_pre_call(psp_hle_pre_call_fn fn);
+
 /* Look up what is registered, for reporting. Returns NULL if absent. */
 const char *psp_hle_name(uint32_t nid);
 int         psp_hle_count(void);

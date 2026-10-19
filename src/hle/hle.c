@@ -104,22 +104,27 @@ void psp_hle_dump_recent(FILE *out) {
 
 static psp_hle_trace_fn g_trace;
 
+static psp_hle_pre_call_fn g_pre_call;
+
 void psp_hle_set_trace(psp_hle_trace_fn fn) { g_trace = fn; }
+void psp_hle_set_pre_call(psp_hle_pre_call_fn fn) { g_pre_call = fn; }
 
 void psp_hle_call(uint32_t nid) {
     uint32_t args[8], ra = psp_cpu.r[PSP_REG_RA];
-    if (g_trace) {
+    if (g_trace || g_pre_call) {
         for (int i = 0; i < 4; i++) args[i] = psp_cpu.r[PSP_REG_A0 + i];
         for (int i = 0; i < 4; i++) args[4 + i] = psp_cpu.r[PSP_REG_T0 + i];
     }
     for (int i = 0; i < g_count; i++) {
         if (g_entry[i].nid == nid) {
+            if (g_pre_call) g_pre_call(nid, g_entry[i].name, args, ra);
             g_fn[i]();
             if (psp_cpu.r[PSP_REG_V0] == 0) note_zero(nid, g_entry[i].name);
             if (g_trace) g_trace(nid, g_entry[i].name, args, psp_cpu.r[PSP_REG_V0], psp_cpu.r[PSP_REG_V1], ra);
             return;
         }
     }
+    if (g_pre_call) g_pre_call(nid, NULL, args, ra);
     note_zero(nid, NULL);
 
     /* Unimplemented. Naming the function is the whole point — bringing a game
