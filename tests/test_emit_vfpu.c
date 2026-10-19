@@ -49,11 +49,29 @@ static void expect(uint32_t word, const char *needle) {
     }
 }
 
+/* `needle` must not appear in the C generated for `word`. */
+static void reject(uint32_t word, const char *needle) {
+    if (strstr(emit_one(word), needle)) {
+        printf("FAIL 0x%08X: unexpected \"%s\"\n", word, needle);
+        failures++;
+    }
+}
+
 int main(void) {
     /* vcst takes its constant index from bits 20..16 (vimm5), not from vs.
      * pspas: vcst.s S000, VFPU_PI = 0xD0690000; the game's 2/pi is 0xD0650024. */
     expect(0xD0690000u, "psp_vcst(0, 9, 1);");
     expect(0xD0650024u, "psp_vcst(36, 5, 1);");
+
+    /* bvf 0 / bvt 2 / bvtl 5, all to BASE+16 (offset 3). The vfpu_cc bit is
+     * bits 20..18 (vimm5 >> 2), the type bits 17..16. pspas, .set noreorder,
+     * label four instructions ahead: 0x49000003, 0x49090003, 0x49170003. */
+    expect(0x49000003u, "!((psp_cpu.vfpu_cc >> 0) & 1)");
+    expect(0x49090003u, "((psp_cpu.vfpu_cc >> 2) & 1)");
+    expect(0x49170003u, "((psp_cpu.vfpu_cc >> 5) & 1)");
+    reject(0x49090003u, "!((psp_cpu.vfpu_cc");
+    reject(0x49170003u, "!((psp_cpu.vfpu_cc");
+    expect(0x49020003u, "!((psp_cpu.vfpu_cc >> 0) & 1)");   /* bvfl 0 */
 
     remove("./t_emit_vfpu_funcs.c");
     remove("./t_emit_vfpu_funcs.h");

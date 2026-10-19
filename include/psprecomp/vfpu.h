@@ -19,16 +19,22 @@
  * and vscl/vmul/vadd/vdot another 18%. Those, plus the compare/min/max family,
  * are implemented here and unit-tested.
  *
- * The **prefix** instructions are not. `vpfxs`/`vpfxt`/`vpfxd` do not compute
+ * The **prefix** instructions `vpfxs`/`vpfxt`/`vpfxd` do not compute
  * anything -- they set a register that rewrites the *operands of the next
- * instruction*, swizzling lanes, negating, forcing constants, masking writes.
- * An arithmetic op executed while a prefix is pending computes something
- * different from the same op without one.
+ * instruction*: swizzling lanes, taking abs, negating, forcing constants,
+ * saturating and masking writes. An op executed while a prefix is pending
+ * computes something different from the same op without one.
  *
- * So a pending prefix makes the next arithmetic op **trap** rather than
- * compute. Implementing the arithmetic while ignoring the prefixes would be
- * worse than not implementing it at all: it would produce numbers that are
- * silently wrong instead of an error that says so. Loud beats plausible.
+ * They are implemented for the element-wise ops: vadd, vsub, vmul, vdiv,
+ * vmin, vmax, vdot, vscl, vcmp, the vunary family (vmov ... vi2f), vidt and
+ * vcst. Each reads its sources through the S/T prefixes, writes through the D
+ * prefix, and consumes all three. viim/vfim consume them and write raw.
+ *
+ * The matrix ops (vmidt, vmzero, vmone, vmmov, vmscl, vtfm, vmmul) do not
+ * support prefixes. One executed while a prefix is pending **traps** through
+ * the trap handler below rather than computing: ignoring the prefix would
+ * produce numbers that are silently wrong instead of an error that says so.
+ * Loud beats plausible.
  */
 #ifndef PSPRECOMP_VFPU_H
 #define PSPRECOMP_VFPU_H
@@ -95,13 +101,26 @@ void psp_vmscl(uint32_t vd, uint32_t vs, uint32_t vt, int size);
 void psp_vtfm(uint32_t vd, uint32_t vs, uint32_t vt, int size);
 void psp_vmmul(uint32_t vd, uint32_t vs, uint32_t vt, int size);
 
-/* Prefix state. Set by vpfxs/vpfxt/vpfxd; consumed (and cleared) by the next
- * arithmetic instruction. While any is pending, arithmetic traps. */
+/* Prefix state. vpfxs/vpfxt rewrite the next op's vs/vt operand (lane
+ * select, abs, constant, negate); vpfxd saturates and masks its writes.
+ * Every VFPU op that computes consumes all three. */
+enum { PSP_VPFX_S = 0, PSP_VPFX_T = 1, PSP_VPFX_D = 2 };
 void psp_vfpu_set_prefix(int which, uint32_t value);
 int  psp_vfpu_prefix_pending(void);
+/* Clears the prefixes and the trap count. The trap handler is left alone, so
+ * a host's handler survives a reset. */
 void psp_vfpu_reset(void);
 
-/* Reports an instruction the VFPU cannot yet execute, by address and name. */
+/* What happens when the VFPU meets something it cannot execute (an op with
+ * no prefix support while a prefix is pending, an unknown vunary selector).
+ * NULL restores the default: print the first few and count them. A host
+ * that must not run on with wrong values installs a handler that stops. */
+typedef void (*psp_vfpu_trap_fn)(uint32_t addr, const char *what);
+void psp_vfpu_set_trap_handler(psp_vfpu_trap_fn fn);
+
+/* Reports an instruction the VFPU cannot yet execute, by address and name:
+ * through the trap handler when one is installed, otherwise printed and
+ * counted. `addr` is psp_cpu.pc, which is only exact at dispatch boundaries. */
 void psp_vfpu_unimplemented(uint32_t addr, const char *what);
 uint64_t psp_vfpu_trap_count(void);
 

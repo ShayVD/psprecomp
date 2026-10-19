@@ -98,3 +98,7 @@ add_test(NAME decode_vfpu COMMAND test_decode_vfpu)
 add_executable(test_emit_vfpu test_emit_vfpu.c)
 target_link_libraries(test_emit_vfpu PRIVATE allegrex_core)
 add_test(NAME emit_vfpu COMMAND test_emit_vfpu)
+
+add_executable(test_vfpu_prefix test_vfpu_prefix.c)
+target_link_libraries(test_vfpu_prefix PRIVATE psprecomp)
+add_test(NAME vfpu_prefix COMMAND test_vfpu_prefix)

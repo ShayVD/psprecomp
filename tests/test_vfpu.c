@@ -2,10 +2,12 @@
  *
  * Two things get pinned here. The first is register addressing, because the
  * layout is what makes a matrix row and column alias correctly and everything
- * else is built on it. The second is that a pending prefix makes arithmetic
- * *trap* rather than compute: partial VFPU that ignores prefixes produces
- * silently wrong numbers, which is the one failure mode this project has spent
- * its whole life avoiding.
+ * else is built on it. The second is that a pending prefix is never ignored:
+ * an element-wise op computes the prefixed result, and an op without prefix
+ * support *traps* rather than compute -- partial VFPU that ignores prefixes
+ * produces silently wrong numbers, which is the one failure mode this project
+ * has spent its whole life avoiding. test_vfpu_prefix.c covers the prefix
+ * semantics themselves.
  */
 
 #include "psprecomp/vfpu.h"
@@ -173,21 +175,31 @@ static void test_prefix_traps(void) {
     psp_vadd(0x08, 0x00, 0x04, 4);
     CHECK(psp_vfpu_trap_count() == before, "no prefix, no trap");
 
-    /* With one pending, it must trap instead of quietly ignoring it. */
+    /* An element-wise op with one pending computes the prefixed result:
+     * vpfxs [Y, Y, Y, Y] makes vs read 2 in every lane. */
     psp_vfpu_set_prefix(0, 0x00000055);
     CHECK(psp_vfpu_prefix_pending(), "prefix registers as pending");
 
-    float before_out[4];
-    get_quad(0x0C, before_out);
+    float out[4];
     psp_vadd(0x0C, 0x00, 0x04, 4);
+    get_quad(0x0C, out);
+    for (int i = 0; i < 4; i++) CHECK_F(out[i], 2.0f + a[i], "prefixed vadd lane");
+    CHECK(psp_vfpu_trap_count() == before, "a prefixed element-wise op does not trap");
+    CHECK(!psp_vfpu_prefix_pending(), "the prefix is consumed by the op");
+
+    /* A matrix op has no prefix support: with one pending it must trap
+     * instead of quietly ignoring it. */
+    float before_m[4], after_m[4];
+    get_quad(0x10, before_m);
+    psp_vfpu_set_prefix(0, 0x00000055);
+    psp_vmmov(0x10, 0x00, 4);
 
     CHECK(psp_vfpu_trap_count() == before + 1,
-          "a pending prefix traps rather than computing");
+          "a pending prefix makes a matrix op trap rather than compute");
     CHECK(!psp_vfpu_prefix_pending(), "the prefix is consumed by the attempt");
 
-    float after_out[4];
-    get_quad(0x0C, after_out);
-    CHECK(memcmp(before_out, after_out, sizeof after_out) == 0,
+    get_quad(0x10, after_m);
+    CHECK(memcmp(before_m, after_m, sizeof after_m) == 0,
           "the trapped op wrote nothing -- silently wrong output is the one "
           "outcome worse than an error");
 }

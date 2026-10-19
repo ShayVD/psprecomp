@@ -52,6 +52,12 @@ target_include_directories(psprecomp PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
+# PSP floats are never fused: a*b+c rounds twice on the Allegrex and the VFPU.
+# Clang contracts within expressions by default, which changes results.
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(psprecomp PRIVATE -ffp-contract=off)
+endif()
+
 # --- the recompiler -----------------------------------------------------------
 
 add_subdirectory(tools/allegrexrecomp)

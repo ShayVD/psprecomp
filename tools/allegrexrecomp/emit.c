@@ -404,10 +404,6 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
     case A_VCMP:
         fprintf(f, "%spsp_vcmp(%u, %u, %u, %u);\n", ind, in->vd & 0xF, in->vs, in->vt, in->vsize); return;
 
-    /* Prefixes gate the arithmetic above: with one pending, the next vector op
-     * traps instead of computing the unprefixed answer. Emitting these is what
-     * makes that guard fire at all -- without them the guard is dead code and
-     * every prefixed operation silently produces the wrong number. */
     /* VFPU4 unary ops, all through one runtime entry point. */
     case A_VMOV: case A_VABS: case A_VNEG: case A_VZERO: case A_VONE:
     case A_VRCP: case A_VRSQ: case A_VSQRT: case A_VSIN: case A_VCOS:
@@ -476,6 +472,10 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
     case A_VMMOV:
         fprintf(f, "%spsp_vmmov(%u, %u, %u);\n", ind, in->vd, in->vs, in->vsize); return;
 
+    /* Prefixes rewrite the next op's operands: the element-wise ops above
+     * apply them, the matrix ops trap on one. Emitting these is what makes
+     * either happen at all -- without them every prefixed operation would
+     * silently compute the unprefixed number. */
     case A_VPFXS:
         fprintf(f, "%spsp_vfpu_set_prefix(0, 0x%06Xu);\n", ind, in->raw & 0xFFFFFF); return;
     case A_VPFXT:
@@ -515,6 +515,12 @@ static void branch_cond(char *buf, size_t n, const a_insn *in) {
     case A_BGEZAL: case A_BGEZALL: snprintf(buf, n, "(int32_t)%s >= 0", rs); break;
     case A_BC1T: case A_BC1TL: snprintf(buf, n, "psp_fpu_cond()"); break;
     case A_BC1F: case A_BC1FL: snprintf(buf, n, "!psp_fpu_cond()"); break;
+    /* VFPU condition branches: bits 20..18 pick a vfpu_cc bit (0-3 lanes,
+     * 4 any, 5 all, as vcmp writes them); bits 17..16 are the type. */
+    case A_BVF: case A_BVFL:
+        snprintf(buf, n, "!((psp_cpu.vfpu_cc >> %u) & 1)", (unsigned)(in->vimm5 >> 2)); break;
+    case A_BVT: case A_BVTL:
+        snprintf(buf, n, "((psp_cpu.vfpu_cc >> %u) & 1)", (unsigned)(in->vimm5 >> 2)); break;
     default:                   snprintf(buf, n, "0 /* unhandled branch */"); break;
     }
 }
