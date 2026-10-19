@@ -71,8 +71,9 @@ static void expect_order(uint32_t word, const char *first, const char *then) {
 int main(void) {
     /* break is SPECIAL funct 0x0D with the 20-bit code field in bits 25..6:
      * code 0x700 is 0x700 << 6 | 0x0D. It is the guest's own trap, not a
-     * translation gap. Code 7 (0x000001CD) is what MIPS compilers emit for an
-     * integer divide by zero. */
+     * translation gap. Code 7 as 0x000001CD (7 in the low ten bits of the
+     * field, bits 15..6) is SNC's encoding of the integer divide-by-zero
+     * check; GNU as puts the code in the upper half instead (0x0007000D). */
     expect(0x0001C00Du, "psp_break(0x08804000u, 0x00700u);");
     expect(0x000001CDu, "psp_break(0x08804000u, 0x00007u);");
     {   /* the generated header declares it, for the host to define */

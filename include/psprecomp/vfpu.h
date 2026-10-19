@@ -25,23 +25,43 @@
  * saturating and masking writes. An op executed while a prefix is pending
  * computes something different from the same op without one.
  *
- * They are implemented for the element-wise ops: vadd, vsub, vmul, vdiv,
- * vmin, vmax, vdot, vscl, vcmp, the vunary family (vmov ... vi2f), vidt and
- * vcst. Each reads its sources through the S/T prefixes, writes through the D
- * prefix, and consumes all three. viim/vfim consume them and write raw.
+ * ## Prefix support
  *
- * vsge and vslt are element-wise and take all three. vrot reads its angle
- * through vpfxs and writes through vpfxd; vcmov reads through vpfxs and
- * writes through vpfxd (kept lanes included, UNVERIFIED), and traps on a
- * pending vpfxt, which it has no operand for. vcrsp and vqmul apply only
- * vpfxd: a pending vpfxs or vpfxt traps, since their semantics there are
- * unverified and the game never prefixes them.
+ * "apply" means the operand is read (S, T) or written (D) through the
+ * prefix; "trap" means the op reports through the trap handler below, writes
+ * nothing, and computes nothing. Either way the op consumes all three
+ * prefixes. A trap is used where the op has no such operand, or where the
+ * semantics are unverified and the game never needs them: ignoring a prefix
+ * would produce numbers that are silently wrong instead of an error that
+ * says so. Loud beats plausible.
  *
- * The matrix ops (vmidt, vmzero, vmone, vmmov, vmscl, vtfm, vmmul) do not
- * support prefixes. One executed while a prefix is pending **traps** through
- * the trap handler below rather than computing: ignoring the prefix would
- * produce numbers that are silently wrong instead of an error that says so.
- * Loud beats plausible.
+ *   op                                          vpfxs   vpfxt   vpfxd
+ *   vadd vsub vmul vdiv vmin vmax vdot          apply   apply   apply
+ *   vsge vslt                                   apply   apply   apply
+ *   vscl                                        apply   trap    apply
+ *   vcmp (no vector destination)                apply   apply   trap
+ *   vunary: vmov vabs vneg vzero vone vrcp      apply   trap    apply
+ *     vnrcp vrsq vsqrt vsin vcos vnsin vasin
+ *     vexp2 vrexp2 vlog2 vsat0 vsat1
+ *   vrot (the angle is vs)                      apply   trap    apply
+ *   vcmov (kept lanes rewritten too)            apply   trap    apply
+ *   vfad                                        apply   trap    apply
+ *   vavg vocp vsocp vbfy1/2 vsrt1-4 vsgn        trap    trap    apply
+ *   vcrsp vqmul                                 trap    trap    apply
+ *   vidt vcst viim vfim (no source)             trap    trap    apply
+ *   vf2in/z/u/d vi2f, vpack (i2uc ... s2i)      trap    trap    apply (1)
+ *   vrndi vrndf1 vrndf2 (no source)             trap    trap    apply (1)
+ *   vrnds (no vector destination)               trap    trap    trap
+ *   vmidt vmzero vmone vmmov vmscl              trap    trap    trap
+ *   vtfm vhtfm vmmul
+ *   lv/sv, mfv/mtv                              neither read nor consumed
+ *
+ * (1) An integer result (vf2i*, the packing ops, vrndi) is masked but never
+ * saturated; a float result (vi2f, vrndf1/2) takes both.
+ *
+ * What "apply" does on hardware is our reading of the documentation in a few
+ * places (lane wrap for narrow ops, kept vcmov lanes): see the UNVERIFIED
+ * notes in vfpu.c and vfpu_ops.c. P2's oracle checks them.
  */
 #ifndef PSPRECOMP_VFPU_H
 #define PSPRECOMP_VFPU_H
@@ -132,7 +152,7 @@ uint32_t psp_mfv(uint32_t vd);
 void     psp_mtv(uint32_t vd, uint32_t bits);
 
 /* Matrix multiply, transform and scale. See the note in vfpu.c: the operand
- * orientation of vmmul is not independently verified. */
+ * orientation of vmmul, vtfm and vhtfm is not independently verified. */
 void psp_vmscl(uint32_t vd, uint32_t vs, uint32_t vt, int size);
 void psp_vtfm(uint32_t vd, uint32_t vs, uint32_t vt, int size);
 /* The homogeneous transform vhtfm2/3/4: `order` is the matrix order, and the
@@ -143,7 +163,8 @@ void psp_vmmul(uint32_t vd, uint32_t vs, uint32_t vt, int size);
 
 /* Prefix state. vpfxs/vpfxt rewrite the next op's vs/vt operand (lane
  * select, abs, constant, negate); vpfxd saturates and masks its writes.
- * Every VFPU op that computes consumes all three. */
+ * Every VFPU op that computes consumes all three, whether it applies them or
+ * traps (see the table at the top). */
 enum { PSP_VPFX_S = 0, PSP_VPFX_T = 1, PSP_VPFX_D = 2 };
 void psp_vfpu_set_prefix(int which, uint32_t value);
 int  psp_vfpu_prefix_pending(void);
@@ -151,10 +172,13 @@ int  psp_vfpu_prefix_pending(void);
  * a host's handler survives a reset. */
 void psp_vfpu_reset(void);
 
-/* What happens when the VFPU meets something it cannot execute (an op with
- * no prefix support while a prefix is pending, an unknown vunary selector).
- * NULL restores the default: print the first few and count them. A host
- * that must not run on with wrong values installs a handler that stops. */
+/* What happens when the VFPU meets something it cannot execute: a pending
+ * prefix the op traps on (see the table above); a width or order the op does
+ * not have (vidt.s/.t, vrnd*, the packing and lane ops, vhtfm); an unknown
+ * selector or kind (vunary, vlane, vrnd). The op writes nothing and consumes
+ * the prefixes. NULL restores the default: print the first few and count
+ * them. A host that must not run on with wrong values installs a handler that
+ * stops. */
 typedef void (*psp_vfpu_trap_fn)(uint32_t addr, const char *what);
 void psp_vfpu_set_trap_handler(psp_vfpu_trap_fn fn);
 

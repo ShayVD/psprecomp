@@ -20,7 +20,10 @@ void psp_mtv(uint32_t vd, uint32_t bits) {
 
 /* vrot: cosine into one lane, sine into another (or into every other lane
  * when both codes name the same lane), zeros elsewhere. code bit 4 negates
- * the sine. */
+ * the sine. UNVERIFIED on hardware: the lane code layout (sine lane in bits
+ * 3..2, cosine lane in bits 1..0), the negate bit, and that a lane past the
+ * width is dropped. The angle goes through vpfxs and the result through
+ * vpfxd; there is no vt, so a pending vpfxt traps. */
 void psp_vrot(uint32_t vd, uint32_t vs, uint32_t code, int size) {
     if (!psp_vfpu__no_operand(PSP_VPFX_T, "vrot with vpfxt")) return;     /* no vt */
     float a[4], d[4], s, c;
@@ -80,7 +83,10 @@ void psp_vcrsp(uint32_t vd, uint32_t vs, uint32_t vt) {
     psp_vfpu__end();
 }
 
-/* Quaternions as (x, y, z, w), w the real part. */
+/* Quaternions as (x, y, z, w), w the real part, and the product s * t in
+ * that order. UNVERIFIED on hardware: the component convention (w last, not
+ * first) and the operand order; a swapped order flips the sign of the vector
+ * part's cross term. */
 void psp_vqmul(uint32_t vd, uint32_t vs, uint32_t vt) {
     if (crsp_qmul_prefix_trap("vqmul with vpfxs/vpfxt")) return;
     float s[4], t[4], d[4];

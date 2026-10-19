@@ -257,7 +257,10 @@ static inline int psp_fcmp(unsigned cond, float a, float b) {
  * P2 note: denormal inputs are not flushed (a denormal rounded up gives 1); a
  * flush-to-zero VFPU/FPU or a Vita host with FPSCR.FZ set would differ. */
 static inline int32_t psp_cvt_w(double x, int rm) {
-    if (isnan(x)) return INT32_MAX;               /* not x != x: survives -ffinite-math-only */
+    /* The build must never use -ffast-math or -ffinite-math-only: they let
+     * the compiler assume no NaN or inf, which deletes this check (isnan
+     * included) and every NaN/inf rule elsewhere in the runtime. */
+    if (isnan(x)) return INT32_MAX;
     /* Fast path for trunc (the common case): inside this open interval the
      * truncated value is representable, so the cast is defined. */
     if ((rm & 3) == 1 && x > -2147483649.0 && x < 2147483648.0) return (int32_t)x;

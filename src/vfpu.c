@@ -83,6 +83,8 @@ int psp_vfpu_regs(uint32_t vreg, int size, int out[4]) {
 /* Lanes an element-wise op covers for a width field: 1, 2, 3, or 4. */
 static int width(int size) { return vfpu_width(size); }
 
+/* vsat0/vsat1 and the vpfxd saturation modes. A NaN passes through unchanged
+ * (both comparisons are false): UNVERIFIED, the PSP may clamp it to a bound. */
 static float sat0(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
 static float sat1(float v) { return v < -1.0f ? -1.0f : (v > 1.0f ? 1.0f : v); }
 
@@ -230,10 +232,16 @@ BINOP(vadd, a + b)
 BINOP(vsub, a - b)
 BINOP(vmul, a * b)
 BINOP(vdiv, a / b)
+/* UNVERIFIED on hardware: with a NaN operand vmin/vmax return vt's lane
+ * (the comparison is false), and for +0 against -0 likewise vt's (they
+ * compare equal). The PSP may order -0 below +0 or prefer the non-NaN. */
 BINOP(vmin, a < b ? a : b)
 BINOP(vmax, a > b ? a : b)
 
-/* Dot product: sums all lanes, in lane order, into a single destination lane. */
+/* Dot product: sums all lanes, in lane order, into a single destination lane.
+ * Each product is rounded before it is added (no fused multiply-add; a test
+ * pins it). The summation order (left to right from 0.0) is UNVERIFIED on
+ * hardware, which may add pairwise or keep extra precision. */
 void psp_vdot(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
     const int n = width(size);
     float s[4], t[4];
@@ -418,9 +426,9 @@ void psp_vidt(uint32_t vd, int size) {
  * The index is in bits 20..16 of the word (a_insn.vimm5), not in vs; SNC
  * assembles vcst.s S000, VFPU_PI as 0xD0690000. Index 0 is zero and anything
  * past the end reads as zero rather than as garbage. The values are the
- * published constant list, rounded to float; UNVERIFIED that hardware holds
- * exactly these bits, and the entries past 19 (the PSP may define more) are
- * unverified too. The write goes through vpfxd; there is no source, so a
+ * published constant list rounded to float. UNVERIFIED on hardware: that it
+ * holds exactly these bits (the last place may differ) and that indices
+ * 20..31 read zero. The write goes through vpfxd; there is no source, so a
  * pending vpfxs or vpfxt traps. */
 void psp_vcst(uint32_t vd, uint32_t which, int size) {
     if (!psp_vfpu__no_operand(PSP_VPFX_S, "vcst with vpfxs") ||
