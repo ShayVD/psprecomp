@@ -91,6 +91,35 @@ int main(void) {
     reject(0xD8000000u, "psp_cpu.pc =");                     /* lv.q */
     reject(0xDC0000E4u, "psp_cpu.pc =");                     /* vpfxs */
 
+    /* mfv/mtv move one lane as bits (pspas: mfv $a0, S010; mtv $a0, S123) and
+     * cannot trap, so they store no pc. */
+    expect(0x48640001u, "r_a0 = psp_mfv(1);");
+    expect(0x48E40066u, "psp_mtv(102, r_a0);");
+    reject(0x48640001u, "psp_cpu.pc =");
+    reject(0x48E40066u, "psp_cpu.pc =");
+
+    /* Pipeline control. Only the canonical vsync immediate is a no-op: the
+     * decoder turns every other 0xFFFFxxxx into vsync, and a data word
+     * reached as code must stay loud. */
+    expect(0xFFFF0000u, ";  /* vnop */");
+    expect(0xFFFF0320u, ";  /* vsync */");
+    expect(0xFFFF040Du, ";  /* vflush */");
+    {
+        const char *src = emit_one(0xFFFF0001u);
+        if (!strstr(src, "psp_unimplemented(0x08804000u, \"vsync with an unexpected immediate\");")) {
+            printf("FAIL 0xFFFF0001: expected psp_unimplemented for vsync\n");
+            failures++;
+        }
+        if (strstr(src, "/* vsync */")) { printf("FAIL 0xFFFF0001: emitted as a no-op\n"); failures++; }
+    }
+
+    /* The pc store comes from the call sites themselves; check each op
+     * family so a new case that forgets it is caught. Words are from the
+     * decoder tests (test_decode_vfpu.c) or built from the field layouts. */
+    expect_order(0x60008080u, "psp_cpu.pc =", "psp_vadd(");       /* binary */
+    expect_order(0xD0000080u, "psp_cpu.pc =", "psp_vunary(");     /* unary: vmov.q */
+    expect_order(0xF3838080u, "psp_cpu.pc =", "psp_vmidt(");      /* matrix */
+
     remove("./t_emit_vfpu_funcs.c");
     remove("./t_emit_vfpu_funcs.h");
     remove("./t_emit_vfpu_imports.c");

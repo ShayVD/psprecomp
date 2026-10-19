@@ -95,6 +95,11 @@ void psp_vmzero(uint32_t vd, int size);
 void psp_vmone(uint32_t vd, int size);
 void psp_vmmov(uint32_t vd, uint32_t vs, int size);
 
+/* mfv/mtv: move a single register's bits to or from a GPR. They ignore
+ * prefixes and cannot trap. */
+uint32_t psp_mfv(uint32_t vd);
+void     psp_mtv(uint32_t vd, uint32_t bits);
+
 /* Matrix multiply, transform and scale. See the note in vfpu.c: the operand
  * orientation of vmmul is not independently verified. */
 void psp_vmscl(uint32_t vd, uint32_t vs, uint32_t vt, int size);

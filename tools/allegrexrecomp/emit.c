@@ -126,36 +126,22 @@ static void emit_static_call(ectx *c, uint32_t target) {
 
 /* ---- one non-control-flow instruction ------------------------------------ */
 
+/* Nothing else maintains psp_cpu.pc, so a VFPU call stores its own address
+ * first: a trap inside it (see vfpu_trap) then names this instruction. Every
+ * case in emit_simple that emits a computing psp_v* call does it itself, so
+ * the set cannot drift from the set of calls. Not covered, because they
+ * cannot trap: the lv/sv loads and stores, the prefix setters, mfv/mtv (one
+ * lane moved as bits, no prefix consulted) and the no-op pipeline ops. */
+static void emit_vcall_pc(FILE *f, const char *ind, const a_insn *in) {
+    fprintf(f, "%spsp_cpu.pc = 0x%08Xu;\n", ind, in->addr);
+}
+
 /* `ind` is the indentation, so a delay slot emitted inside an `if` body lines
  * up. Returns nothing: unhandled opcodes emit a trap rather than nothing, so
  * a gap is loud at run time instead of silently doing the wrong thing. */
-/* The VFPU ops emitted as runtime calls that compute (and so may trap, or
- * may in a later revision). Loads, stores and the prefix setters are not. */
-static int vfpu_call_op(a_op op) {
-    switch (op) {
-    case A_VADD: case A_VSUB: case A_VMUL: case A_VDIV: case A_VMIN: case A_VMAX:
-    case A_VDOT: case A_VSCL: case A_VCMP:
-    case A_VMOV: case A_VABS: case A_VNEG: case A_VZERO: case A_VONE:
-    case A_VRCP: case A_VRSQ: case A_VSQRT: case A_VSIN: case A_VCOS:
-    case A_VEXP2: case A_VLOG2: case A_VSAT0: case A_VSAT1:
-    case A_VNRCP: case A_VNSIN: case A_VASIN: case A_VF2IZ: case A_VI2F:
-    case A_VIDT: case A_VCST: case A_VIIM: case A_VFIM:
-    case A_VMMUL: case A_VTFM2: case A_VTFM3: case A_VTFM4: case A_VMSCL:
-    case A_VMIDT: case A_VMZERO: case A_VMONE: case A_VMMOV:
-        return 1;
-    default:
-        return 0;
-    }
-}
-
 static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
     FILE *f = c->out;
     const char *rd = RN[in->rd], *rs = RN[in->rs], *rt = RN[in->rt];
-
-    /* Nothing else maintains psp_cpu.pc, so a VFPU op stores its own address
-     * before the call: a trap inside it then names this instruction. */
-    if (vfpu_call_op(in->op))
-        fprintf(f, "%spsp_cpu.pc = 0x%08Xu;\n", ind, in->addr);
 
     /* Writes to $zero are discarded by the hardware. Emitting them would
      * clobber a register the rest of the code assumes is always zero. */
@@ -410,22 +396,31 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
         fprintf(f, "%spsp_sv_q(%u, %s + %d);\n", ind, in->vt, rs, in->imm & ~3); return;
 
     case A_VADD:
+        emit_vcall_pc(f, ind, in);
         fprintf(f, "%spsp_vadd(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
     case A_VSUB:
+        emit_vcall_pc(f, ind, in);
         fprintf(f, "%spsp_vsub(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
     case A_VMUL:
+        emit_vcall_pc(f, ind, in);
         fprintf(f, "%spsp_vmul(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
     case A_VDIV:
+        emit_vcall_pc(f, ind, in);
         fprintf(f, "%spsp_vdiv(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
     case A_VMIN:
+        emit_vcall_pc(f, ind, in);
         fprintf(f, "%spsp_vmin(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
     case A_VMAX:
+        emit_vcall_pc(f, ind, in);
         fprintf(f, "%spsp_vmax(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
     case A_VDOT:
+        emit_vcall_pc(f, ind, in);
         fprintf(f, "%spsp_vdot(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
     case A_VSCL:
+        emit_vcall_pc(f, ind, in);
         fprintf(f, "%spsp_vscl(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
     case A_VCMP:
+        emit_vcall_pc(f, ind, in);
         fprintf(f, "%spsp_vcmp(%u, %u, %u, %u);\n", ind, in->vd & 0xF, in->vs, in->vt, in->vsize); return;
 
     /* VFPU4 unary ops, all through one runtime entry point. */
@@ -447,6 +442,7 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
         };
         for (size_t k = 0; k < sizeof U / sizeof U[0]; k++) {
             if (U[k].op != in->op) continue;
+            emit_vcall_pc(f, ind, in);
             fprintf(f, "%spsp_vunary(%s, %u, %u, %u);\n",
                     ind, U[k].sel, in->vd, in->vs, in->vsize);
             return;
@@ -457,14 +453,17 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
     /* Constant generators. These carry no source operand: what they produce is
      * encoded in the register number (vidt) or an index (vcst). */
     case A_VIDT:
+        emit_vcall_pc(f, ind, in);
         fprintf(f, "%spsp_vidt(%u, %u);\n", ind, in->vd, in->vsize);
         return;
     case A_VCST:
+        emit_vcall_pc(f, ind, in);
         fprintf(f, "%spsp_vcst(%u, %u, %u);\n", ind, in->vd, in->vimm5, in->vsize);
         return;
 
     /* Immediate loads: the value is in the instruction, not a register. */
     case A_VIIM:
+        emit_vcall_pc(f, ind, in);
         fprintf(f, "%spsp_vimm(%u, %.1ff);\n", ind, in->vd, (double)in->imm);
         return;
     case A_VFIM:
@@ -475,6 +474,7 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
             const uint32_t bits = half_to_bits((uint16_t)in->imm);
             float fv;
             memcpy(&fv, &bits, sizeof fv);
+            emit_vcall_pc(f, ind, in);
             fprintf(f, "%spsp_vimm(%u, psp_bits_to_f32(0x%08Xu));  /* %.9g */\n",
                     ind, in->vd, bits, (double)fv);
         }
@@ -482,19 +482,51 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
 
     /* Matrix ops that need no multiply. `vsize` is the matrix order here. */
     case A_VMMUL:
+        emit_vcall_pc(f, ind, in);
         fprintf(f, "%spsp_vmmul(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
     case A_VTFM2: case A_VTFM3: case A_VTFM4:
+        emit_vcall_pc(f, ind, in);
         fprintf(f, "%spsp_vtfm(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
     case A_VMSCL:
+        emit_vcall_pc(f, ind, in);
         fprintf(f, "%spsp_vmscl(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
     case A_VMIDT:
+        emit_vcall_pc(f, ind, in);
         fprintf(f, "%spsp_vmidt(%u, %u);\n", ind, in->vd, in->vsize); return;
     case A_VMZERO:
+        emit_vcall_pc(f, ind, in);
         fprintf(f, "%spsp_vmzero(%u, %u);\n", ind, in->vd, in->vsize); return;
     case A_VMONE:
+        emit_vcall_pc(f, ind, in);
         fprintf(f, "%spsp_vmone(%u, %u);\n", ind, in->vd, in->vsize); return;
     case A_VMMOV:
+        emit_vcall_pc(f, ind, in);
         fprintf(f, "%spsp_vmmov(%u, %u, %u);\n", ind, in->vd, in->vs, in->vsize); return;
+
+    /* Moves between a GPR and a VFPU single, as bits. These cannot trap, so
+     * they do not store the pc. (mfvc/mtvc, bit 7, are separate ops and stay
+     * unimplemented; the game has none.) */
+    case A_MFV:
+        if (DEST_ZERO(in->rt)) { fprintf(f, "%s;\n", ind); return; }
+        fprintf(f, "%s%s = psp_mfv(%u);\n", ind, rt, in->vd); return;
+    case A_MTV:
+        fprintf(f, "%spsp_mtv(%u, %s);\n", ind, in->vd, rt); return;
+
+    /* Pipeline control. Nothing to model. The decoder maps every 0xFFFFxxxx
+     * other than vnop and vflush to vsync, so only the canonical immediate
+     * SNC emits (0x0320) is a no-op; anything else is more likely data
+     * reached as code, and stays loud. */
+    case A_VNOP:
+        fprintf(f, "%s;  /* vnop */\n", ind); return;
+    case A_VFLUSH:
+        fprintf(f, "%s;  /* vflush */\n", ind); return;
+    case A_VSYNC:
+        if ((in->raw & 0xFFFFu) == 0x0320u) {
+            fprintf(f, "%s;  /* vsync */\n", ind); return;
+        }
+        fprintf(f, "%spsp_unimplemented(0x%08Xu, \"vsync with an unexpected immediate\");\n",
+                ind, in->addr);
+        return;
 
     /* Prefixes rewrite the next op's operands: the element-wise ops above
      * apply them, the matrix ops trap on one. Emitting these is what makes
