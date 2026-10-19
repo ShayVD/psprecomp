@@ -882,7 +882,7 @@ static void test_lane_prefixes(void) {
     static const struct { int op; int size; } W[] = {
         { PSP_VL_SOCP, 3 }, { PSP_VL_SOCP, 4 }, { PSP_VL_BFY1, 1 }, { PSP_VL_BFY1, 3 }, { PSP_VL_BFY2, 2 },
         { PSP_VL_SRT1, 3 }, { PSP_VL_SRT2, 2 }, { PSP_VL_SRT3, 1 }, { PSP_VL_SRT4, 3 }, { PSP_VL_FAD, 0 },
-        { PSP_VL_FAD, 5 }, { 99, 4 },
+        { PSP_VL_FAD, 5 },
     };
     for (size_t k = 0; k < sizeof W / sizeof W[0]; k++) {
         g_traps = 0;
@@ -894,8 +894,39 @@ static void test_lane_prefixes(void) {
         CHECK(g_traps == 1 && g_trap_what && !strcmp(g_trap_what, "vlane width") && o[0] == 9 && o[1] == 9,
               "vlane op %d width %d traps (%d)", W[k].op, W[k].size, g_traps);
     }
+
+    /* An op the function does not have says so, rather than blaming the width. */
+    g_traps = 0;
+    g_trap_what = NULL;
+    set4(0x01u, 4, src);
+    set4(0x00u, 4, keep);
+    psp_vlane(99, 0x00u, 0x01u, 4);
+    get(0x00u, 4, o);
+    CHECK(g_traps == 1 && g_trap_what && !strcmp(g_trap_what, "vlane op") && o[0] == 9 && o[1] == 9,
+          "unknown vlane op traps as such (%d)", g_traps);
     psp_vfpu_set_trap_handler(NULL);
     psp_vfpu_reset();
+}
+
+/* vsrt permutes its inputs, whatever they hold: on a tie or a NaN min and max
+ * are exact complements, so each input appears once in the pair. (+0, -0)
+ * keeps both zeros; (NaN, 1) puts the NaN in the max slot. UNVERIFIED on
+ * hardware. vsocp passes a NaN through its saturation: UNVERIFIED too. */
+static void test_lane_nan_ties(void) {
+    uint32_t a[4];
+    psp_vfpu_reset();
+    const uint32_t tie[4] = { 0x00000000u, 0x80000000u, 0x7FC00000u, 0x3F800000u };   /* +0 -0 NaN 1 */
+    set_bits(0x01u, 4, tie);
+    psp_vlane(PSP_VL_SRT1, 0x00u, 0x01u, 4);
+    get_bits(0x00u, 4, a);
+    CHECK(a[0] == 0x80000000u && a[1] == 0x00000000u && a[2] == 0x3F800000u && a[3] == 0x7FC00000u,
+          "vsrt1 on ties and NaN: %08X %08X %08X %08X", a[0], a[1], a[2], a[3]);
+    const float nn[4] = { NAN, 1.0f, 1.0f, 1.0f };
+    float o[4];
+    set4(0x01u, 4, nn);
+    psp_vlane(PSP_VL_SOCP, 0x00u, 0x01u, 2); get(0x00u, 4, o);
+    CHECK(isnan(o[0]) && isnan(o[1]) && o[2] == 0.0f && o[3] == 1.0f,
+          "vsocp.p with a NaN lane: %g %g %g %g", o[0], o[1], o[2], o[3]);
 }
 
 static void test_random(void) {
@@ -1015,6 +1046,24 @@ static void test_random(void) {
     psp_vrnd(PSP_VR_F2, 0x00u, 4); get(0x00u, 4, o);
     CHECK(g_traps == 0 && o[0] == 1.0f && bits(o[1]) == 77u && o[2] >= 2.0f && o[3] >= 2.0f,
           "vrndf2 under vpfxd: %g %g %g %g", o[0], o[1], o[2], o[3]);
+    /* A size or kind the op does not have traps and writes nothing. */
+    {
+        static const struct { int kind; int size; const char *what; } B[] = {
+            { PSP_VR_I, 0, "vrnd width" }, { PSP_VR_F1, 5, "vrnd width" }, { PSP_VR_F2, -1, "vrnd width" },
+            { 99, 4, "vrnd kind" },
+        };
+        for (size_t k = 0; k < sizeof B / sizeof B[0]; k++) {
+            g_traps = 0;
+            g_trap_what = NULL;
+            set_bits(0x00u, 4, keep);
+            psp_vfpu_set_prefix(PSP_VPFX_D, 0x1u);
+            psp_vrnd(B[k].kind, 0x00u, B[k].size);
+            get_bits(0x00u, 4, b);
+            CHECK(g_traps == 1 && g_trap_what && !strcmp(g_trap_what, B[k].what) &&
+                  b[0] == 77 && b[1] == 77 && b[3] == 77 && !psp_vfpu_prefix_pending(),
+                  "vrnd kind %d size %d traps (%d)", B[k].kind, B[k].size, g_traps);
+        }
+    }
     psp_vfpu_set_trap_handler(NULL);
     psp_vfpu_reset();
 }
@@ -1036,6 +1085,7 @@ int main(void) {
     test_lane_ops();
     test_lane_destinations();
     test_lane_prefixes();
+    test_lane_nan_ties();
     test_random();
     printf("%s\n", failures ? "test_vfpu_ops: FAILED" : "test_vfpu_ops: ok");
     return failures ? 1 : 0;

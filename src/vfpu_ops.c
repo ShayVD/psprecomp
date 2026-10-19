@@ -235,20 +235,23 @@ static int lane_prefix_trap(int op) {
 }
 
 static float lmin(float a, float b) { return a < b ? a : b; }
-static float lmax(float a, float b) { return a > b ? a : b; }
+/* The exact complement of lmin: together they return each input once, so vsrt
+ * permutes its lanes on ties (+0, -0) and NaNs. */
+static float lmax(float a, float b) { return a < b ? b : a; }
 static float lsat0(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
 
 /* UNVERIFIED on hardware, all of it: the order of the sum (left to right,
  * starting from lane 0 so that -0 survives), vavg as sum / n rather than
  * sum * (1/n), vsocp's saturation, the vsrt/vbfy lane pairings and vsgn
- * giving 0 for NaN and for -0. Min and max here return the second operand
- * when either is NaN. All sources are read before anything is written, so a
+ * giving 0 for NaN and for -0, and vsocp passing a NaN through its
+ * saturation. Min returns the second operand when either is NaN and max the
+ * first, so a NaN lands in the max slot. All sources are read before anything is written, so a
  * destination overlapping the source is safe. */
 void psp_vlane(int op, uint32_t vd, uint32_t vs, int size) {
     if (lane_prefix_trap(op)) return;
-    if (size < 1 || size > 4) goto bad;
     float s[4], d[4] = { 0, 0, 0, 0 };
     int dn = size;
+    if (size < 1 || size > 4) goto bad;
     vfpu_read(PSP_VPFX_S, vs, size, s);
     switch (op) {
     case PSP_VL_FAD: case PSP_VL_AVG: {
@@ -294,7 +297,9 @@ void psp_vlane(int op, uint32_t vd, uint32_t vs, int size) {
         for (int i = 0; i < size; i++) d[i] = s[i] > 0.0f ? 1.0f : s[i] < 0.0f ? -1.0f : 0.0f;
         break;
     default:
-        goto bad;
+        vfpu_end();
+        vfpu_trap("vlane op");
+        return;
     }
     vfpu_write(vd, dn, d);
     vfpu_end();
@@ -343,7 +348,9 @@ void psp_vrnds(uint32_t vs) {
 
 void psp_vrnd(int kind, uint32_t vd, int size) {
     if (rnd_prefix_trap()) return;
-    const int n = vfpu_width(size);
+    if (size < 1 || size > 4) { vfpu_end(); vfpu_trap("vrnd width"); return; }
+    if (kind != PSP_VR_I && kind != PSP_VR_F1 && kind != PSP_VR_F2) { vfpu_end(); vfpu_trap("vrnd kind"); return; }
+    const int n = size;
     uint32_t d[4] = { 0, 0, 0, 0 };
     for (int i = 0; i < n; i++) {
         const uint32_t r = rnd_next();
