@@ -21,6 +21,8 @@ void vfpu_end(void);
 /* For ops without prefix support: 1 to go ahead, or 0 after trapping (and
  * consuming the prefixes) if one is pending. */
 int vfpu_no_prefix(const char *what);
+/* Sine and cosine of an angle in quarter turns; exact at whole quarter turns. */
+void vfpu_sincos_q(float a, float *s, float *c);
 /* Report through the trap handler. */
 void vfpu_trap(const char *what);
 

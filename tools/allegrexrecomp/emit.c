@@ -480,6 +480,25 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
         }
         return;
 
+    case A_VROT:
+        emit_vcall_pc(f, ind, in);
+        fprintf(f, "%spsp_vrot(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vimm5, in->vsize); return;
+    case A_VCMOV:
+        emit_vcall_pc(f, ind, in);
+        fprintf(f, "%spsp_vcmov(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vimm5 & 0xFu, in->vsize); return;
+    case A_VCRSP:
+        emit_vcall_pc(f, ind, in);
+        fprintf(f, "%spsp_vcrsp(%u, %u, %u);\n", ind, in->vd, in->vs, in->vt); return;
+    case A_VQMUL:
+        emit_vcall_pc(f, ind, in);
+        fprintf(f, "%spsp_vqmul(%u, %u, %u);\n", ind, in->vd, in->vs, in->vt); return;
+    case A_VSGE:
+        emit_vcall_pc(f, ind, in);
+        fprintf(f, "%spsp_vsge(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
+    case A_VSLT:
+        emit_vcall_pc(f, ind, in);
+        fprintf(f, "%spsp_vslt(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
+
     /* Matrix ops that need no multiply. `vsize` is the matrix order here. */
     case A_VMMUL:
         emit_vcall_pc(f, ind, in);

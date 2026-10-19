@@ -253,6 +253,27 @@ void psp_vscl(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
 
 /* ---- unary element-wise ops (VFPU4) -------------------------------------- */
 
+/* Sine and cosine of an angle in quarter turns. Whole quarter turns are
+ * exact (0, +-1), as on the PSP: rotation matrices built from vsin/vcos/vrot
+ * must have real zeros in them. Otherwise computed in double. Matching the
+ * PSP's last-bit results elsewhere is P2's oracle work. */
+void vfpu_sincos_q(float a, float *s, float *c) {
+    if (isnan(a) || isinf(a)) { *s = *c = NAN; return; }
+    double x = fmod((double)a, 4.0);
+    if (x < 0) x += 4.0;
+    if (x == floor(x)) {
+        static const float S[4] = { 0.0f, 1.0f, 0.0f, -1.0f };
+        static const float C[4] = { 1.0f, 0.0f, -1.0f, 0.0f };
+        const int k = (int)x & 3;
+        *s = S[k];
+        *c = C[k];
+        return;
+    }
+    const double r = x * 1.5707963267948966;
+    *s = (float)sin(r);
+    *c = (float)cos(r);
+}
+
 void psp_vunary(int op, uint32_t vd, uint32_t vs, int size) {
     const int n = width(size);
     float s[4];
@@ -277,9 +298,9 @@ void psp_vunary(int op, uint32_t vd, uint32_t vs, int size) {
          * sin(x * pi/2), not sin(x). Treating it as radians gives a result
          * that is smooth, plausible, and wrong -- rotations end up at the
          * wrong angle rather than visibly broken. */
-        case PSP_VU_SIN:  r = sinf(a * 1.5707963267948966f);  break;
-        case PSP_VU_COS:  r = cosf(a * 1.5707963267948966f);  break;
-        case PSP_VU_NSIN: r = -sinf(a * 1.5707963267948966f); break;
+        case PSP_VU_SIN:  { float s_, c_; vfpu_sincos_q(a, &s_, &c_); r = s_; }  break;
+        case PSP_VU_COS:  { float s_, c_; vfpu_sincos_q(a, &s_, &c_); r = c_; }  break;
+        case PSP_VU_NSIN: { float s_, c_; vfpu_sincos_q(a, &s_, &c_); r = -s_; } break;
         case PSP_VU_ASIN: r = asinf(a) * 0.6366197723675814f; break;  /* 2/pi */
         case PSP_VU_EXP2: r = powf(2.0f, a);   break;
         case PSP_VU_REXP2:r = 1.0f / powf(2.0f, a); break;

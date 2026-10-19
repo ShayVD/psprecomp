@@ -123,6 +123,15 @@ void psp_vfpu_reset(void);
 typedef void (*psp_vfpu_trap_fn)(uint32_t addr, const char *what);
 void psp_vfpu_set_trap_handler(psp_vfpu_trap_fn fn);
 
+/* vrot: lane code (bits 20..16) and width; see vfpu_ops.c. */
+void psp_vrot(uint32_t vd, uint32_t vs, uint32_t code, int size);
+/* vcmovt/vcmovf: code = tf (bit 3) | cc (bits 2..0). */
+void psp_vcmov(uint32_t vd, uint32_t vs, uint32_t code, int size);
+void psp_vcrsp(uint32_t vd, uint32_t vs, uint32_t vt);   /* .t */
+void psp_vqmul(uint32_t vd, uint32_t vs, uint32_t vt);   /* .q */
+void psp_vsge(uint32_t vd, uint32_t vs, uint32_t vt, int size);
+void psp_vslt(uint32_t vd, uint32_t vs, uint32_t vt, int size);
+
 /* Reports an instruction the VFPU cannot yet execute, by address and name:
  * through the trap handler when one is installed, otherwise printed and
  * counted. `addr` is psp_cpu.pc, which the generated code sets to the

@@ -97,6 +97,15 @@ int main(void) {
     reject(0x48640001u, "psp_cpu.pc =");
     reject(0x48E40066u, "psp_cpu.pc =");
 
+    /* vrot (code 0x11 = [-s,c,0,0]), vcmovf cc 6 (vimm5 0x0E), vcrsp.t, vqmul.q,
+     * vsge, vslt. pspas words. */
+    expect(0xF3B18180u, "psp_vrot(0, 1, 17, 4);");
+    expect(0xD2AE8180u, "psp_vcmov(0, 1, 14, 4);");
+    expect(0xF2828100u, "psp_vcrsp(0, 1, 2);");
+    expect(0xF2828180u, "psp_vqmul(0, 1, 2);");
+    expect(0x6F028180u, "psp_vsge(0, 1, 2, 4);");
+    expect(0x6F828180u, "psp_vslt(0, 1, 2, 4);");
+
     /* Pipeline control. Only the canonical vsync immediate is a no-op: the
      * decoder turns every other 0xFFFFxxxx into vsync, and a data word
      * reached as code must stay loud. */
@@ -142,6 +151,12 @@ int main(void) {
             { 0xF3868080u, A_VMZERO,"psp_vmzero(" },
             { 0xF3878080u, A_VMONE, "psp_vmone("  },
             { 0xF3808080u, A_VMMOV, "psp_vmmov("  },
+            { 0xF3B18180u, A_VROT,  "psp_vrot("   },
+            { 0xD2AE8180u, A_VCMOV, "psp_vcmov("  },
+            { 0xF2828100u, A_VCRSP, "psp_vcrsp("  },
+            { 0xF2828180u, A_VQMUL, "psp_vqmul("  },
+            { 0x6F028180u, A_VSGE,  "psp_vsge("   },
+            { 0x6F828180u, A_VSLT,  "psp_vslt("   },
         };
         for (size_t i = 0; i < sizeof T / sizeof T[0]; i++) {
             a_insn d;
