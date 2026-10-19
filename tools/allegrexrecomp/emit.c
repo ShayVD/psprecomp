@@ -540,7 +540,7 @@ static void emit_slot_alias(ectx *c, uint32_t a, const a_insn *slot, int falls_t
             fprintf(c->out, "    PSP_SP_CHECK(0x%08Xu);\n    return;\n", after);
         }
     }
-    fprintf(c->out, "L_%08X:\n", a + 4);
+    fprintf(c->out, "L_%08X: PSP_MARK(0x%08Xu);\n", a + 4, a + 4);
     comment(c, slot);
     emit_simple(c, slot, "    ");
 }
@@ -562,7 +562,7 @@ static void emit_function(ectx *c, const a_func *fn) {
         if (in.has_target && in.is_branch && owned_by(an, in.target, owner))
             c->is_label[widx(an, in.target)] = 1;
         if (in.is_jump && !in.is_indirect && in.has_target &&
-            owned_by(an, in.target, owner) && !is_function(an, in.target))
+            is_local_block(an, in.target, owner))
             c->is_label[widx(an, in.target)] = 1;
         /* A recovered switch: each case block this function owns is a goto
          * target (a case that is another function's entry is a tail call). */
@@ -842,7 +842,8 @@ static void emit_function(ectx *c, const a_func *fn) {
 
         if (in.is_jump) {                        /* j */
             if (have_slot) { comment(c, &slot); emit_simple(c, &slot, "    "); }
-            if (owned_by(an, in.target, owner) && !is_function(an, in.target)) {
+            /* Its own entry included: `j` back to the start is a loop. */
+            if (is_local_block(an, in.target, owner)) {
                 if (in.target <= a) fprintf(f, "    PSP_LOOP(0x%08Xu);\n", in.target);
                 fprintf(f, "    goto L_%08X;\n", in.target);
             } else {

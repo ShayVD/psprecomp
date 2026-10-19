@@ -742,9 +742,9 @@ int main(void) {
         const char *swi = sw ? strstr(sw, "switch (_sw) {") : NULL;
         CHECK(inl && swi && inl < swi, "slot runs inline before the switch");
         CHECK(strstr(src, "case 0x0880401Cu: goto L_0880401C;") != NULL, "slot case is a goto");
-        const char *alias = strstr(src, "L_0880401C:\n");
+        const char *alias = strstr(src, "L_0880401C: PSP_MARK(0x0880401Cu);\n");
         const char *after = alias ? strstr(alias, "/* 08804020") : NULL;
-        CHECK(alias && after, "the slot's copy carries on at 0x20");
+        CHECK(alias && after, "the slot's copy is marked and carries on at 0x20");
         CHECK(strstr(src, "void psp_at_0880401C(void)") != NULL, "the slot can be entered");
         a_analysis_free(&an);
     }
@@ -836,6 +836,24 @@ int main(void) {
         CHECK(a_discover(&an, &s0, 1) == 0, "discover (loop %d)", k);
         CHECK(an.nfuncs == 1 && an.owner[0x04 / 4] == BASE,
               "%s back-edge: one function, got %d", k ? "j" : "branch", an.nfuncs);
+        a_analysis_free(&an);
+    }
+
+    /* A `j` back to the function's own entry is a loop, not a C recursion. */
+    {
+        memset(g_w, 0, sizeof g_w);
+        g_w[0x00 / 4] = addiu(A0, A0, -1);
+        g_w[0x04 / 4] = beq(A0, 0, BASE + 0x04, BASE + 0x14);
+        g_w[0x0C / 4] = j_(BASE);                  /* slot at 0x10 */
+        g_w[0x14 / 4] = JR_RA;
+        store();
+        uint32_t s0 = BASE;
+        setup(&an, 0x1C);
+        CHECK(a_discover(&an, &s0, 1) == 0, "discover (j to entry)");
+        const char *src = emit_source(&an, "t_j_entry");
+        CHECK(strstr(src, "PSP_LOOP(0x08804000u);\n    goto L_08804000;") != NULL,
+              "j to its own entry loops");
+        CHECK(strstr(src, "psp_func_08804000(); PSP_SP_CALL") == NULL, "no recursive call");
         a_analysis_free(&an);
     }
 
