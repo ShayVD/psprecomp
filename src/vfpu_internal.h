@@ -7,6 +7,11 @@
 
 #include "psprecomp/vfpu.h"
 
+/* Lanes an element-wise op covers for a width field: 1, 2, 3, or 4. */
+static inline int vfpu_width(int size) { return size >= 1 && size <= 3 ? size : 4; }
+/* 1 if the S (PSP_VPFX_S) or T (PSP_VPFX_T) prefix is pending. */
+int vfpu_prefix_is_set(int which);
+
 /* `n` lanes of `vreg` as operand `which` (PSP_VPFX_S or PSP_VPFX_T), with
  * that operand's pending prefix applied. */
 void vfpu_read(int which, uint32_t vreg, int n, float out[4]);

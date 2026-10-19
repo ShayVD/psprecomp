@@ -27,30 +27,48 @@ void psp_vrot(uint32_t vd, uint32_t vs, uint32_t code, int size) {
     vfpu_sincos_q(a[0], &s, &c);
     if (code & 0x10) s = -s;
     const int sl = (int)(code >> 2) & 3, cl = (int)code & 3;
-    for (int i = 0; i < size; i++) d[i] = (sl == cl) ? s : 0.0f;
-    if (sl != cl && sl < size) d[sl] = s;
-    if (cl < size) d[cl] = c;
-    vfpu_write(vd, size, d);
+    const int n = vfpu_width(size);
+    for (int i = 0; i < n; i++) d[i] = (sl == cl) ? s : 0.0f;
+    if (sl != cl && sl < n) d[sl] = s;
+    if (cl < n) d[cl] = c;
+    vfpu_write(vd, n, d);
     vfpu_end();
 }
 
 /* vcmovt (tf = 0) moves when the condition bit is 1, vcmovf when it is 0.
  * cc 0-5 is one vfpu_cc bit for all lanes, 6 is each lane's own bit, 7 never
- * moves. Lanes that do not move keep their value. */
+ * moves. A lane that does not move keeps its old value, but every lane is
+ * written back through the destination prefix, so a pending vpfxd saturates
+ * the kept values too and a masked lane is skipped. UNVERIFIED on hardware:
+ * the game has one vcmov with a prefix pending, and it is a vpfxs. There is
+ * no vt operand, so a pending vpfxt is not ours to interpret: trap. */
 void psp_vcmov(uint32_t vd, uint32_t vs, uint32_t code, int size) {
+    if (vfpu_prefix_is_set(PSP_VPFX_T)) { vfpu_end(); vfpu_trap("vcmov with vpfxt"); return; }
     const uint32_t tf = (code >> 3) & 1, cc = code & 7;
+    const int n = vfpu_width(size);
     float s[4], d[4];
-    vfpu_read(PSP_VPFX_S, vs, size, s);
-    vfpu_read_raw(vd, size, d);
-    for (int i = 0; i < size && cc != 7; i++) {
+    vfpu_read(PSP_VPFX_S, vs, n, s);
+    vfpu_read_raw(vd, n, d);
+    for (int i = 0; i < n && cc != 7; i++) {
         const uint32_t bit = (psp_cpu.vfpu_cc >> (cc < 6 ? cc : (uint32_t)i)) & 1;
         if (bit ^ tf) d[i] = s[i];
     }
-    vfpu_write(vd, size, d);
+    vfpu_write(vd, n, d);
     vfpu_end();
 }
 
+/* The semantics of vpfxs/vpfxt on vcrsp and vqmul are unverified, and none of
+ * the game's 30 sites has one pending (counted in the generated code): trap
+ * rather than guess. The destination prefix applies as for any op. */
+static int crsp_qmul_prefix_trap(const char *what) {
+    if (!vfpu_prefix_is_set(PSP_VPFX_S) && !vfpu_prefix_is_set(PSP_VPFX_T)) return 0;
+    vfpu_end();
+    vfpu_trap(what);
+    return 1;
+}
+
 void psp_vcrsp(uint32_t vd, uint32_t vs, uint32_t vt) {
+    if (crsp_qmul_prefix_trap("vcrsp with vpfxs/vpfxt")) return;
     float s[4], t[4], d[4];
     vfpu_read(PSP_VPFX_S, vs, 3, s);
     vfpu_read(PSP_VPFX_T, vt, 3, t);
@@ -63,6 +81,7 @@ void psp_vcrsp(uint32_t vd, uint32_t vs, uint32_t vt) {
 
 /* Quaternions as (x, y, z, w), w the real part. */
 void psp_vqmul(uint32_t vd, uint32_t vs, uint32_t vt) {
+    if (crsp_qmul_prefix_trap("vqmul with vpfxs/vpfxt")) return;
     float s[4], t[4], d[4];
     vfpu_read(PSP_VPFX_S, vs, 4, s);
     vfpu_read(PSP_VPFX_T, vt, 4, t);
@@ -75,12 +94,13 @@ void psp_vqmul(uint32_t vd, uint32_t vs, uint32_t vt) {
 }
 
 static void compare_set(uint32_t vd, uint32_t vs, uint32_t vt, int size, int ge) {
+    const int n = vfpu_width(size);
     float s[4], t[4], d[4];
-    vfpu_read(PSP_VPFX_S, vs, size, s);
-    vfpu_read(PSP_VPFX_T, vt, size, t);
-    for (int i = 0; i < size; i++)
+    vfpu_read(PSP_VPFX_S, vs, n, s);
+    vfpu_read(PSP_VPFX_T, vt, n, t);
+    for (int i = 0; i < n; i++)
         d[i] = (ge ? s[i] >= t[i] : s[i] < t[i]) ? 1.0f : 0.0f;   /* NaN: false, 0 */
-    vfpu_write(vd, size, d);
+    vfpu_write(vd, n, d);
     vfpu_end();
 }
 void psp_vsge(uint32_t vd, uint32_t vs, uint32_t vt, int size) { compare_set(vd, vs, vt, size, 1); }

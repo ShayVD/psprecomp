@@ -30,6 +30,13 @@
  * vcst. Each reads its sources through the S/T prefixes, writes through the D
  * prefix, and consumes all three. viim/vfim consume them and write raw.
  *
+ * vsge and vslt are element-wise and take all three. vrot reads its angle
+ * through vpfxs and writes through vpfxd; vcmov reads through vpfxs and
+ * writes through vpfxd (kept lanes included, UNVERIFIED), and traps on a
+ * pending vpfxt, which it has no operand for. vcrsp and vqmul apply only
+ * vpfxd: a pending vpfxs or vpfxt traps, since their semantics there are
+ * unverified and the game never prefixes them.
+ *
  * The matrix ops (vmidt, vmzero, vmone, vmmov, vmscl, vtfm, vmmul) do not
  * support prefixes. One executed while a prefix is pending **traps** through
  * the trap handler below rather than computing: ignoring the prefix would

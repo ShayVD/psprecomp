@@ -32,6 +32,8 @@ int psp_vfpu_prefix_pending(void) {
     return g_prefix_set[0] || g_prefix_set[1] || g_prefix_set[2];
 }
 
+int vfpu_prefix_is_set(int which) { return which >= 0 && which < 3 && g_prefix_set[which]; }
+
 uint64_t psp_vfpu_trap_count(void) { return g_traps; }
 
 void psp_vfpu_set_trap_handler(psp_vfpu_trap_fn fn) { g_trap_fn = fn; }
@@ -78,7 +80,7 @@ int psp_vfpu_regs(uint32_t vreg, int size, int out[4]) {
 /* ---- operands through the prefixes -------------------------------------- */
 
 /* Lanes an element-wise op covers for a width field: 1, 2, 3, or 4. */
-static int width(int size) { return size >= 1 && size <= 3 ? size : 4; }
+static int width(int size) { return vfpu_width(size); }
 
 static float sat0(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
 static float sat1(float v) { return v < -1.0f ? -1.0f : (v > 1.0f ? 1.0f : v); }
@@ -255,23 +257,33 @@ void psp_vscl(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
 
 /* Sine and cosine of an angle in quarter turns. Whole quarter turns are
  * exact (0, +-1), as on the PSP: rotation matrices built from vsin/vcos/vrot
- * must have real zeros in them. Otherwise computed in double. Matching the
+ * must have real zeros in them. The angle is reduced around the nearest
+ * quarter turn (the subtraction is exact), so tiny angles of either sign keep
+ * their precision. The sign of a zero sine follows the angle (sin(-0) = -0);
+ * that and the zero cosine being +0 are UNVERIFIED on hardware. Matching the
  * PSP's last-bit results elsewhere is P2's oracle work. */
 void vfpu_sincos_q(float a, float *s, float *c) {
     if (isnan(a) || isinf(a)) { *s = *c = NAN; return; }
-    double x = fmod((double)a, 4.0);
-    if (x < 0) x += 4.0;
-    if (x == floor(x)) {
-        static const float S[4] = { 0.0f, 1.0f, 0.0f, -1.0f };
-        static const float C[4] = { 1.0f, 0.0f, -1.0f, 0.0f };
-        const int k = (int)x & 3;
-        *s = S[k];
-        *c = C[k];
-        return;
+    const double x = fmod((double)a, 4.0);          /* exact, |x| < 4, sign of a */
+    const double q = nearbyint(x);
+    double f = x - q;                               /* exact, |f| <= 1/2 */
+    const int exact = (f == 0.0);
+    if (exact) f = copysign(0.0, (double)a);
+    f *= 1.5707963267948966;
+    const double s0 = sin(f), c0 = cos(f);
+    double sv, cv;
+    switch ((int)q & 3) {
+    case 0:  sv =  s0; cv =  c0; break;
+    case 1:  sv =  c0; cv = -s0; break;
+    case 2:  sv = -s0; cv = -c0; break;
+    default: sv = -c0; cv =  s0; break;
     }
-    const double r = x * 1.5707963267948966;
-    *s = (float)sin(r);
-    *c = (float)cos(r);
+    if (exact) {
+        if (sv == 0.0) sv = copysign(0.0, (double)a);
+        if (cv == 0.0) cv = 0.0;
+    }
+    *s = (float)sv;
+    *c = (float)cv;
 }
 
 void psp_vunary(int op, uint32_t vd, uint32_t vs, int size) {
