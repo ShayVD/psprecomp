@@ -170,6 +170,13 @@ int psp_vfpu__no_prefix(const char *what) {
     return 0;
 }
 
+int psp_vfpu__no_operand(int which, const char *what) {
+    if (!psp_vfpu__prefix_is_set(which)) return 1;
+    psp_vfpu__end();
+    psp_vfpu__trap(what);
+    return 0;
+}
+
 /* ---- load / store -------------------------------------------------------- */
 
 void psp_lv_s(uint32_t vt, uint32_t addr) {
@@ -288,6 +295,7 @@ void psp_vfpu__sincos_q(float a, float *s, float *c) {
 }
 
 void psp_vunary(int op, uint32_t vd, uint32_t vs, int size) {
+    if (!psp_vfpu__no_operand(PSP_VPFX_T, "vunary with vpfxt")) return;   /* no vt */
     const int n = width(size);
     float s[4];
     psp_vfpu__read(PSP_VPFX_S, vs, n, s);
@@ -382,11 +390,14 @@ void psp_vmidt(uint32_t vd, int size) {
  * every 1 in lane 0.
  *
  * Single and triple forms are not verified (the game uses neither): they
- * trap rather than guess.
+ * trap rather than guess. The write goes through vpfxd; there is no source,
+ * so a pending vpfxs or vpfxt traps.
  *
  * This is matrix-setup code. Trapping it to a no-op leaves whatever was in the
  * register, so downstream geometry is built on a basis that is not a basis. */
 void psp_vidt(uint32_t vd, int size) {
+    if (!psp_vfpu__no_operand(PSP_VPFX_S, "vidt with vpfxs") ||
+        !psp_vfpu__no_operand(PSP_VPFX_T, "vidt with vpfxt")) return;     /* no source */
     const int n = width(size);
     if (n != 2 && n != 4) {
         psp_vfpu__end();
@@ -403,9 +414,15 @@ void psp_vidt(uint32_t vd, int size) {
 /* vcst -- load a constant from the VFPU's built-in table.
  *
  * The index is in bits 20..16 of the word (a_insn.vimm5), not in vs; SNC
- * assembles vcst.s S000, VFPU_PI as 0xD0690000. Values follow the hardware table; index 0 is
- * zero and anything past the end reads as zero rather than as garbage. */
+ * assembles vcst.s S000, VFPU_PI as 0xD0690000. Index 0 is zero and anything
+ * past the end reads as zero rather than as garbage. The values are the
+ * published constant list, rounded to float; UNVERIFIED that hardware holds
+ * exactly these bits, and the entries past 19 (the PSP may define more) are
+ * unverified too. The write goes through vpfxd; there is no source, so a
+ * pending vpfxs or vpfxt traps. */
 void psp_vcst(uint32_t vd, uint32_t which, int size) {
+    if (!psp_vfpu__no_operand(PSP_VPFX_S, "vcst with vpfxs") ||
+        !psp_vfpu__no_operand(PSP_VPFX_T, "vcst with vpfxt")) return;     /* no source */
     static const float K[20] = {
         0.0f,
         3.4028235e38f,          /* max float          */
@@ -559,9 +576,10 @@ void psp_vmmul(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
  * lane, bit 5 all lanes. Lane bits n..3 keep their previous value; that is
  * our reading of the documentation, not verified on hardware -- P2's oracle
  * verifies it. The condition is the low nibble; 8..15 test vs alone. Both
- * operands go through their prefixes either way, and vcmp consumes all
- * three. */
+ * operands go through their prefixes either way. There is no vector
+ * destination, so a pending vpfxd traps (the game has none). */
 void psp_vcmp(uint32_t cond, uint32_t vs, uint32_t vt, int size) {
+    if (!psp_vfpu__no_operand(PSP_VPFX_D, "vcmp with vpfxd")) return;     /* writes no vector */
     const int n = width(size);
     float s[4], t[4];
     psp_vfpu__read(PSP_VPFX_S, vs, n, s);
@@ -600,9 +618,11 @@ void psp_vcmp(uint32_t cond, uint32_t vs, uint32_t vt, int size) {
 }
 
 /* viim / vfim -- write a single lane from an immediate encoded in the
- * instruction. There is no source operand to rewrite, but the write goes
- * through the D prefix (mask, saturate) and the op consumes all three. */
+ * instruction. The write goes through the D prefix (mask, saturate); there
+ * is no source operand, so a pending vpfxs or vpfxt traps. */
 void psp_vimm(uint32_t vd, float value) {
+    if (!psp_vfpu__no_operand(PSP_VPFX_S, "vimm with vpfxs") ||
+        !psp_vfpu__no_operand(PSP_VPFX_T, "vimm with vpfxt")) return;     /* no source */
     psp_vfpu__write(vd, 1, &value);
     psp_vfpu__end();
 }

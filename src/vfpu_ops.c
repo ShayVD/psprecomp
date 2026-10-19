@@ -22,6 +22,7 @@ void psp_mtv(uint32_t vd, uint32_t bits) {
  * when both codes name the same lane), zeros elsewhere. code bit 4 negates
  * the sine. */
 void psp_vrot(uint32_t vd, uint32_t vs, uint32_t code, int size) {
+    if (!psp_vfpu__no_operand(PSP_VPFX_T, "vrot with vpfxt")) return;     /* no vt */
     float a[4], d[4], s, c;
     psp_vfpu__read(PSP_VPFX_S, vs, 1, a);
     psp_vfpu__sincos_q(a[0], &s, &c);
@@ -329,7 +330,8 @@ static uint32_t rnd_next(void) {
 
 /* vrnds reads vs, the other three have no source: a vpfxs or vpfxt has
  * nothing to apply to (and the game has none pending at its vrnd* sites), so
- * it traps. A vpfxd applies to the destination of the other three. */
+ * it traps. A vpfxd applies to the destination of the other three; vrnds
+ * writes no vector, so on vrnds it traps too. */
 static int rnd_prefix_trap(void) {
     if (!psp_vfpu__prefix_is_set(PSP_VPFX_S) && !psp_vfpu__prefix_is_set(PSP_VPFX_T)) return 0;
     psp_vfpu__end();
@@ -339,6 +341,7 @@ static int rnd_prefix_trap(void) {
 
 void psp_vrnds(uint32_t vs) {
     if (rnd_prefix_trap()) return;
+    if (!psp_vfpu__no_operand(PSP_VPFX_D, "vrnds with vpfxd")) return;    /* writes no vector */
     float s[4];
     psp_vfpu__read_raw(vs, 1, s);
     const uint32_t b = psp_f32_to_bits(s[0]);

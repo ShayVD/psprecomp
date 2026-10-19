@@ -39,5 +39,10 @@ void psp_vfpu__sincos_q(float a, float *s, float *c);
 void psp_vfpu__rnd_reset(void);
 /* Report through the trap handler. */
 void psp_vfpu__trap(const char *what);
+/* For an op that has no `which` operand (PSP_VPFX_S, _T or _D): 1 to go
+ * ahead, or 0 after trapping with `what` (and consuming the prefixes) if a
+ * prefix for it is pending. A prefix for an operand the op does not have is
+ * not ours to interpret, so it is never silently consumed. */
+int psp_vfpu__no_operand(int which, const char *what);
 
 #endif

@@ -1068,6 +1068,95 @@ static void test_random(void) {
     psp_vfpu_reset();
 }
 
+/* A pending prefix for an operand the op does not have is not ours to
+ * interpret: the op traps, writes nothing, and consumes the prefixes. No game
+ * site has one (counted in the generated code). vpfxt on the vunary family
+ * and vrot (no vt), vpfxs/vpfxt on vidt/vcst/viim/vfim (no source at all),
+ * vpfxd on vcmp and vrnds (no vector destination). */
+static void test_missing_operand_prefixes(void) {
+    float o[4];
+    const float src[4] = { 1, 2, 3, 4 }, keep[4] = { 9, 9, 9, 9 };
+    static const struct { int which; int op; const char *what; } T[] = {
+        { PSP_VPFX_T, 0, "vunary with vpfxt" }, { PSP_VPFX_T, 1, "vrot with vpfxt" },
+        { PSP_VPFX_S, 2, "vidt with vpfxs" },   { PSP_VPFX_T, 2, "vidt with vpfxt" },
+        { PSP_VPFX_S, 3, "vcst with vpfxs" },   { PSP_VPFX_T, 3, "vcst with vpfxt" },
+        { PSP_VPFX_S, 4, "vimm with vpfxs" },   { PSP_VPFX_T, 4, "vimm with vpfxt" },
+    };
+    psp_vfpu_reset();
+    psp_vfpu_set_trap_handler(count_trap);
+    for (size_t k = 0; k < sizeof T / sizeof T[0]; k++) {
+        g_traps = 0;
+        g_trap_what = NULL;
+        set4(0x01u, 4, src); set4(0x00u, 4, keep);
+        psp_vfpu_set_prefix(T[k].which, 0x1B);
+        psp_vfpu_set_prefix(PSP_VPFX_D, 0x0u);          /* consumed with the rest */
+        switch (T[k].op) {
+        case 0: psp_vunary(PSP_VU_NEG, 0x00u, 0x01u, 4); break;
+        case 1: psp_vrot(0x00u, 0x01u, 0x11u, 4);        break;
+        case 2: psp_vidt(0x00u, 4);                      break;
+        case 3: psp_vcst(0x00u, 9, 4);                   break;
+        default: psp_vimm(0x00u, 5.0f);                  break;
+        }
+        get(0x00u, 4, o);
+        CHECK(g_traps == 1 && g_trap_what && !strcmp(g_trap_what, T[k].what),
+              "%s traps (%d, \"%s\")", T[k].what, g_traps, g_trap_what ? g_trap_what : "");
+        CHECK(o[0] == 9 && o[1] == 9 && o[2] == 9 && o[3] == 9, "%s writes nothing: %g %g %g %g",
+              T[k].what, o[0], o[1], o[2], o[3]);
+        CHECK(!psp_vfpu_prefix_pending(), "%s consumes the prefixes", T[k].what);
+    }
+
+    /* vcmp: the condition codes are left alone. */
+    g_traps = 0;
+    g_trap_what = NULL;
+    psp_cpu.vfpu_cc = 0x15u;
+    set4(0x01u, 4, src);
+    psp_vfpu_set_prefix(PSP_VPFX_D, 0x0u);
+    psp_vcmp(4, 0x01u, 0x01u, 4);                         /* TR: would set every bit */
+    CHECK(g_traps == 1 && g_trap_what && !strcmp(g_trap_what, "vcmp with vpfxd") &&
+          psp_cpu.vfpu_cc == 0x15u && !psp_vfpu_prefix_pending(),
+          "vcmp with vpfxd traps (%d), cc 0x%X", g_traps, psp_cpu.vfpu_cc);
+
+    /* vrnds: the seed is not taken. */
+    {
+        const uint32_t seed = 0x12345u;
+        uint32_t a, b;
+        int r[4];
+        psp_vfpu_regs(0x01u, 1, r);
+        psp_cpu.v[r[0]] = psp_bits_to_f32(seed);
+        psp_vfpu_reset();
+        psp_vrnd(PSP_VR_I, 0x00u, 1);
+        a = psp_mfv(0x00u);                                /* the first draw, unseeded */
+        psp_vfpu_reset();
+        g_traps = 0;
+        g_trap_what = NULL;
+        psp_vfpu_set_prefix(PSP_VPFX_D, 0x0u);
+        psp_vrnds(0x01u);
+        psp_vrnd(PSP_VR_I, 0x00u, 1);
+        b = psp_mfv(0x00u);
+        CHECK(g_traps == 1 && g_trap_what && !strcmp(g_trap_what, "vrnds with vpfxd") && a == b &&
+              !psp_vfpu_prefix_pending(), "vrnds with vpfxd traps and does not reseed (%d)", g_traps);
+    }
+
+    /* The operands these ops do have keep their prefixes: vpfxs on vneg,
+     * vpfxd on vidt, vpfxt on vcmp. */
+    g_traps = 0;
+    set4(0x01u, 4, src);
+    psp_vfpu_set_prefix(PSP_VPFX_S, 0x1B);
+    psp_vunary(PSP_VU_NEG, 0x00u, 0x01u, 4);
+    get(0x00u, 4, o);
+    CHECK(g_traps == 0 && o[0] == -4 && o[3] == -1, "vneg with vpfxs: %g %g", o[0], o[3]);
+    set4(0x00u, 4, keep);
+    psp_vfpu_set_prefix(PSP_VPFX_D, 1u << 8);
+    psp_vidt(0x00u, 4);
+    get(0x00u, 4, o);
+    CHECK(g_traps == 0 && o[0] == 9 && o[1] == 0, "vidt with vpfxd: %g %g", o[0], o[1]);
+    psp_vfpu_set_prefix(PSP_VPFX_T, 0x0F000u);
+    psp_vcmp(1, 0x01u, 0x01u, 4);
+    CHECK(g_traps == 0 && !psp_vfpu_prefix_pending(), "vcmp with vpfxt is applied (%d)", g_traps);
+    psp_vfpu_set_trap_handler(NULL);
+    psp_vfpu_reset();
+}
+
 int main(void) {
     psp_vfpu_reset();
     test_moves();
@@ -1087,6 +1176,7 @@ int main(void) {
     test_lane_prefixes();
     test_lane_nan_ties();
     test_random();
+    test_missing_operand_prefixes();
     printf("%s\n", failures ? "test_vfpu_ops: FAILED" : "test_vfpu_ops: ok");
     return failures ? 1 : 0;
 }
