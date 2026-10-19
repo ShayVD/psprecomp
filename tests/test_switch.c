@@ -778,6 +778,36 @@ int main(void) {
         a_analysis_free(&an);
     }
 
+    /* The game's strlen (0x08AEA170): its word loop's head is an entry of
+     * its own, walked after the parent claimed the byte tail. The loop's
+     * fall-through runs on into that tail; returning there instead skipped
+     * the `subu $v0` and handed back garbage. The tail is promoted and
+     * called. Layout: 0x00 bne a1 -> 0x14 (parent); 0x08 loop head (entry):
+     * beql t0, zero -> 0x08, slot; 0x10 or; 0x14 tail: jr ra; subu v0. */
+    {
+        memset(g_w, 0, sizeof g_w);
+        g_w[0x00 / 4] = bne(A1, 0, BASE, BASE + 0x14);
+        g_w[0x04 / 4] = or_(A3, A0, 0);
+        g_w[0x08 / 4] = lw(T0, 0, A2);                   /* loop head */
+        g_w[0x0C / 4] = beql(T0, 0, BASE + 0x0C, BASE + 0x08);
+        g_w[0x10 / 4] = addiu(A2, A2, 4);
+        g_w[0x14 / 4] = JR_RA;                           /* the tail */
+        g_w[0x18 / 4] = 0x00871023u;                     /* subu v0, a0, a3 */
+        store();
+        uint32_t sd[2] = { BASE + 0x08, BASE };          /* BASE is walked first */
+        setup(&an, 0x1C);
+        CHECK(a_discover(&an, sd, 2) == 0, "discover (strlen)");
+        int tail_fn = 0;
+        for (int i = 0; i < an.nfuncs; i++) tail_fn |= an.funcs[i].addr == BASE + 0x14;
+        CHECK(tail_fn, "strlen: the tail is promoted to an entry");
+        const char *src = emit_source(&an, "t_strlen");
+        const char *body = strstr(src, "static void psp_body_08804008");
+        const char *close = body ? strstr(body, "\n}\n") : NULL;
+        const char *call = body ? strstr(body, "psp_func_08804014()") : NULL;
+        CHECK(call && close && call < close, "strlen: the loop runs on into the tail");
+        a_analysis_free(&an);
+    }
+
     /* Always-taken branches end the straight line in the walk and in the
      * emitted body. */
     check_always("b", "t_always_b", beq(0, 0, BASE, BASE + 0x18));
