@@ -96,6 +96,9 @@ typedef enum {
     A_VMMUL, A_VTFM2, A_VTFM3, A_VTFM4, A_VMSCL, A_VCRSP, A_VROT,
     A_VMMOV, A_VMIDT, A_VMZERO, A_VMONE,
     A_VQMUL,
+    /* The homogeneous transforms: vtfmN's slot with a vector one lane
+     * narrower than the matrix order. */
+    A_VHTFM2, A_VHTFM3, A_VHTFM4,
     /* VFPU0 sub-op 2. */
     A_VSBN,
     /* VFPU7 (opcode 0x34, rs=1): random numbers, half floats, packing. */

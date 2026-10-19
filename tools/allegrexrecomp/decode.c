@@ -230,6 +230,9 @@ static const a_opinfo OPINFO[A_OP_COUNT] = {
     [A_VTFM2]    = { "vtfm2",    F_VD_VS_VT },
     [A_VTFM3]    = { "vtfm3",    F_VD_VS_VT },
     [A_VTFM4]    = { "vtfm4",    F_VD_VS_VT },
+    [A_VHTFM2]   = { "vhtfm2",   F_VD_VS_VT },
+    [A_VHTFM3]   = { "vhtfm3",   F_VD_VS_VT },
+    [A_VHTFM4]   = { "vhtfm4",   F_VD_VS_VT },
     [A_VMSCL]    = { "vmscl",    F_VD_VS_VT },
     [A_VCRSP]    = { "vcrsp",    F_VD_VS_VT },
     [A_VQMUL]  = { "vqmul",  F_VD_VS_VT }, [A_VSBN]   = { "vsbn",   F_VD_VS_VT },
@@ -712,9 +715,13 @@ int a_decode(uint32_t word, uint32_t addr, a_insn *out) {
     case 0x3C:
         switch (RS_F(word) & 0x1C) {
         case 0x00: op = A_VMMUL; break;
-        case 0x04: op = A_VTFM2; break;
-        case 0x08: op = A_VTFM3; break;
-        case 0x0C: op = A_VTFM4; break;
+        /* Bits 25..23 = 1/2/3: a transform by a matrix of order 2/3/4. A
+         * vector one lane narrower than the order is the homogeneous form
+         * (vhtfmN: an implicit last lane of 1.0). Any other width keeps the
+         * vtfmN name, and the emitter refuses it. */
+        case 0x04: op = in.vsize == 1 ? A_VHTFM2 : A_VTFM2; break;
+        case 0x08: op = in.vsize == 2 ? A_VHTFM3 : A_VTFM3; break;
+        case 0x0C: op = in.vsize == 3 ? A_VHTFM4 : A_VTFM4; break;
         case 0x10: op = A_VMSCL; break;
         /* vcrsp.t and vqmul.q share rs; the width tells them apart. */
         case 0x14:

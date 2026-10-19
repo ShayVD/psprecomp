@@ -486,25 +486,47 @@ void psp_vmscl(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
  * This is the column-major product a graphics pipeline wants -- the matrix
  * columns are the transformed basis vectors, so transforming (1,0,0,0) yields
  * column 0. That property is what the test pins, and it is the one that
- * distinguishes this from its transpose. */
-void psp_vtfm(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
-    if (!vfpu_no_prefix("vtfm")) return;
+ * distinguishes this from its transpose. Like vmmul's (below), the
+ * orientation is UNVERIFIED against hardware.
+ *
+ * `homog` is the homogeneous form: the vector's last lane is replaced by 1.0,
+ * so the matrix's last column (the translation) is added. The sum runs in the
+ * same order for both, so vhtfmN(M, v) is exactly vtfmN(M, [v, 1]). */
+static void transform(const char *what, uint32_t vd, uint32_t vs, uint32_t vt, int order, int homog) {
+    if (!vfpu_no_prefix(what)) return;
     float m[4][4];
     int d[4], t[4];
-    matrix_read(vs, size, m);
-    psp_vfpu_regs(vt, size, t);
-    psp_vfpu_regs(vd, size, d);
+    matrix_read(vs, order, m);
+    psp_vfpu_regs(vt, order, t);
+    psp_vfpu_regs(vd, order, d);
 
     float in[4], out[4];
-    for (int i = 0; i < size; i++) in[i] = psp_cpu.v[t[i]];
-    for (int r = 0; r < size; r++) {
+    for (int i = 0; i < order; i++) in[i] = psp_cpu.v[t[i]];
+    if (homog) in[order - 1] = 1.0f;
+    for (int r = 0; r < order; r++) {
         float sum = 0.0f;
-        for (int c = 0; c < size; c++) sum += m[c][r] * in[c];
+        for (int c = 0; c < order; c++) sum += m[c][r] * in[c];
         out[r] = sum;
     }
     /* vd may be one of the sources, so write only after the whole result is
      * computed. */
-    for (int r = 0; r < size; r++) psp_cpu.v[d[r]] = out[r];
+    for (int r = 0; r < order; r++) psp_cpu.v[d[r]] = out[r];
+}
+
+void psp_vtfm(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
+    transform("vtfm", vd, vs, vt, size, 0);
+}
+
+/* vhtfm2/3/4. `order` is the matrix order; the instruction's width field is
+ * the vector's, order - 1 lanes. UNVERIFIED on hardware, beyond the
+ * orientation: the destination is written `order` lanes wide (the last is
+ * the transformed 1, i.e. M's last row dotted with [v, 1]), and vd and vt are
+ * addressed as `order`-wide registers. For a register whose bits 6..5 are
+ * clear -- every one of the game's four sites -- order-wide and
+ * (order - 1)-wide addressing name the same leading lanes. */
+void psp_vhtfm(uint32_t vd, uint32_t vs, uint32_t vt, int order) {
+    if (order < 2 || order > 4) { vfpu_end(); vfpu_trap("vhtfm order"); return; }
+    transform("vhtfm", vd, vs, vt, order, 1);
 }
 
 /* Matrix product, composed from the same transform used above so the two

@@ -126,6 +126,9 @@ static void emit_static_call(ectx *c, uint32_t target) {
 
 /* ---- one non-control-flow instruction ------------------------------------ */
 
+_Static_assert(A_VTFM3 == A_VTFM2 + 1 && A_VTFM4 == A_VTFM2 + 2 &&
+               A_VHTFM3 == A_VHTFM2 + 1 && A_VHTFM4 == A_VHTFM2 + 2 && A_VHTFM2 > A_VTFM4,
+               "a transform's matrix order is its offset from A_VTFM2 / A_VHTFM2, plus 2");
 _Static_assert(A_VF2IZ == A_VF2IN + 1 && A_VF2IU == A_VF2IN + 2 && A_VF2ID == A_VF2IN + 3,
                "psp_vf2i's rounding mode is the op's offset from A_VF2IN");
 
@@ -572,9 +575,23 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
     case A_VMMUL:
         emit_vcall_pc(f, ind, in);
         fprintf(f, "%spsp_vmmul(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
+    /* Transforms: the order is the op (vtfm2/3/4, vhtfm2/3/4), the width the
+     * vector's. vtfmN takes an N-lane vector, the homogeneous vhtfmN an
+     * (N-1)-lane one; any other width is not an instruction we can name. */
     case A_VTFM2: case A_VTFM3: case A_VTFM4:
+    case A_VHTFM2: case A_VHTFM3: case A_VHTFM4: {
+        const int homog = in->op >= A_VHTFM2;
+        const unsigned order = 2u + (unsigned)(homog ? in->op - A_VHTFM2 : in->op - A_VTFM2);
+        if (in->vsize != (homog ? order - 1 : order)) {
+            fprintf(f, "%spsp_unimplemented(0x%08Xu, \"%s with a bad width\");\n",
+                    ind, in->addr, a_mnemonic(in->op));
+            return;
+        }
         emit_vcall_pc(f, ind, in);
-        fprintf(f, "%spsp_vtfm(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
+        fprintf(f, "%spsp_%s(%u, %u, %u, %u);\n", ind, homog ? "vhtfm" : "vtfm",
+                in->vd, in->vs, in->vt, order);
+        return;
+    }
     case A_VMSCL:
         emit_vcall_pc(f, ind, in);
         fprintf(f, "%spsp_vmscl(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;

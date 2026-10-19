@@ -355,6 +355,75 @@ static void test_matrix_transform(void) {
                 "vmmul and vtfm agree: (A*B)x == A(Bx)");
 }
 
+/* vhtfmN: the vector gets an implicit last lane of 1.0, so the matrix's last
+ * column -- in the same orientation psp_vtfm uses -- is added: a translation.
+ * Matrices: M = 2 (0x08), vector = 6 (0x18), results in 7 (0x1C) and 0. */
+static void test_homogeneous_transform(void) {
+    psp_vfpu_reset();
+    float m[4][4];
+    int t[4], d[4], e[4];
+
+    /* A translation by (5, -6, 7): identity, last column (5, -6, 7, 1). */
+    for (int c = 0; c < 4; c++)
+        for (int r = 0; r < 4; r++) m[c][r] = (c == r) ? 1.0f : 0.0f;
+    m[3][0] = 5.0f; m[3][1] = -6.0f; m[3][2] = 7.0f;
+    set_matrix(0x08, 4, m);
+    psp_vfpu_regs(0x18, 4, t);
+    const float p[4] = { 1.0f, 2.0f, 3.0f, 99.0f };   /* lane 3 is not part of the vector */
+    for (int i = 0; i < 4; i++) psp_cpu.v[t[i]] = p[i];
+    psp_vhtfm(0x1C, 0x08, 0x18, 4);
+    psp_vfpu_regs(0x1C, 4, d);
+    CHECK_F(psp_cpu.v[d[0]], 6.0f, "vhtfm4 translates x");
+    CHECK_F(psp_cpu.v[d[1]], -4.0f, "vhtfm4 translates y");
+    CHECK_F(psp_cpu.v[d[2]], 10.0f, "vhtfm4 translates z");
+    CHECK_F(psp_cpu.v[d[3]], 1.0f, "vhtfm4 w is 1");
+
+    /* vhtfmN(M, v) is vtfmN(M, [v, 1]) exactly, for a general matrix and
+     * every order: one orientation for both. */
+    for (int order = 2; order <= 4; order++) {
+        for (int c = 0; c < 4; c++)
+            for (int r = 0; r < 4; r++) m[c][r] = (float)((c + 2) * (r + 3) % 7) - 2.5f;
+        set_matrix(0x08, order, m);
+        psp_vfpu_regs(0x18, order, t);
+        for (int i = 0; i < order; i++) psp_cpu.v[t[i]] = (float)i * 1.5f - 1.0f;
+        psp_vhtfm(0x1C, 0x08, 0x18, order);
+        psp_cpu.v[t[order - 1]] = 1.0f;
+        psp_vtfm(0x00, 0x08, 0x18, order);
+        psp_vfpu_regs(0x1C, order, d);
+        psp_vfpu_regs(0x00, order, e);
+        for (int r = 0; r < order; r++)
+            CHECK(psp_cpu.v[d[r]] == psp_cpu.v[e[r]],
+                  "vhtfm%d lane %d: %f, vtfm with a 1 appended: %f",
+                  order, r, (double)psp_cpu.v[d[r]], (double)psp_cpu.v[e[r]]);
+    }
+
+    /* With a zero translation column the first three lanes are the 3x3
+     * transform of the vector (what was emitted before vhtfm existed). */
+    for (int c = 0; c < 4; c++)
+        for (int r = 0; r < 4; r++) m[c][r] = c == 3 ? 0.0f : (float)(c * 3 + r) - 4.0f;
+    set_matrix(0x08, 4, m);
+    psp_vfpu_regs(0x18, 4, t);
+    for (int i = 0; i < 4; i++) psp_cpu.v[t[i]] = p[i];
+    psp_vhtfm(0x1C, 0x08, 0x18, 4);
+    psp_vtfm(0x00, 0x08, 0x18, 3);
+    psp_vfpu_regs(0x1C, 3, d);
+    psp_vfpu_regs(0x00, 3, e);
+    for (int r = 0; r < 3; r++)
+        CHECK(psp_cpu.v[d[r]] == psp_cpu.v[e[r]], "zero translation: vhtfm4 lane %d == vtfm3", r);
+
+    /* A pending prefix traps, as for vtfm, and nothing is written. */
+    const uint64_t before = psp_vfpu_trap_count();
+    psp_cpu.v[d[0]] = 42.0f;
+    psp_vfpu_set_prefix(PSP_VPFX_S, 0xE4);
+    psp_vhtfm(0x1C, 0x08, 0x18, 4);
+    CHECK(psp_vfpu_trap_count() == before + 1, "vhtfm with a prefix traps");
+    CHECK(!psp_vfpu_prefix_pending(), "and consumes it");
+    CHECK(psp_cpu.v[d[0]] == 42.0f, "and writes nothing");
+    /* An order the instruction cannot encode traps. */
+    psp_vhtfm(0x1C, 0x08, 0x18, 1);
+    CHECK(psp_vfpu_trap_count() == before + 2, "vhtfm order 1 traps");
+}
+
 /* vcst: index -> value, against the published VFPU constant list. */
 static void test_vcst_table(void) {
     static const double want[20] = {
@@ -392,6 +461,7 @@ int main(void) {
     test_compare();
     test_matrix_ops();
     test_matrix_transform();
+    test_homogeneous_transform();
     test_vcst_table();
 
     psp_mem_free();

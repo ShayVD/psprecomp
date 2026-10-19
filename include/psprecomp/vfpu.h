@@ -135,6 +135,10 @@ void     psp_mtv(uint32_t vd, uint32_t bits);
  * orientation of vmmul is not independently verified. */
 void psp_vmscl(uint32_t vd, uint32_t vs, uint32_t vt, int size);
 void psp_vtfm(uint32_t vd, uint32_t vs, uint32_t vt, int size);
+/* The homogeneous transform vhtfm2/3/4: `order` is the matrix order, and the
+ * (order - 1)-lane vector gets an implicit last lane of 1.0, so the matrix's
+ * last column is added. Same orientation as psp_vtfm. */
+void psp_vhtfm(uint32_t vd, uint32_t vs, uint32_t vt, int order);
 void psp_vmmul(uint32_t vd, uint32_t vs, uint32_t vt, int size);
 
 /* Prefix state. vpfxs/vpfxt rewrite the next op's vs/vt operand (lane

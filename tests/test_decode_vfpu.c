@@ -118,6 +118,21 @@ int main(void) {
     dec(0xF2820000u, A_VFPU_UNKNOWN, "vfpu?");   /* .s */
     dec(0xF2820080u, A_VFPU_UNKNOWN, "vfpu?");   /* .p */
 
+    /* VFPU6 transforms: bits 25..23 = 1/2/3 give the matrix order 2/3/4. A
+     * vector as wide as the order is vtfmN; one lane narrower is the
+     * homogeneous vhtfmN (an implicit last lane of 1.0). Words from decode.c's
+     * layout: vt 2 (bits 22..16), vs 1, vd 0, width bits 15 and 7. */
+    dec(0xF1828180u, A_VTFM4,  "vtfm4");    /* .q */
+    dec(0xF1828100u, A_VHTFM4, "vhtfm4");   /* .t */
+    dec(0xF1028100u, A_VTFM3,  "vtfm3");    /* .t */
+    dec(0xF1020180u, A_VHTFM3, "vhtfm3");   /* .p */
+    dec(0xF0820180u, A_VTFM2,  "vtfm2");    /* .p */
+    dec(0xF0820100u, A_VHTFM2, "vhtfm2");   /* .s */
+    dec(0xF180A408u, A_VHTFM4, "vhtfm4");   /* the game's, at 0x08827738 */
+    /* Any other width keeps the vtfm name; the emitter refuses it. */
+    dec(0xF1820180u, A_VTFM4,  "vtfm4");    /* .p */
+    dec(0xF0828180u, A_VTFM2,  "vtfm2");    /* .q */
+
     /* vsync carries a 16-bit immediate; 0x0000 is vnop, 0x040D vflush. */
     dec(0xFFFF0001u, A_VSYNC, "vsync");
     dec(0xFFFF8000u, A_VSYNC, "vsync");

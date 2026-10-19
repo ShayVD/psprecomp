@@ -125,6 +125,29 @@ int main(void) {
     expect(0x6F028180u, "psp_vsge(0, 1, 2, 4);");
     expect(0x6F828180u, "psp_vslt(0, 1, 2, 4);");
 
+    /* VFPU6 transforms. The order is in bits 25..23 (1/2/3: 2/3/4) and the
+     * width is the vector's: as wide as the order is vtfmN, one lane narrower
+     * the homogeneous vhtfmN, which adds the matrix's last column. Anything
+     * else is not an instruction we can name, and stays loud. Words from
+     * decode.c's layout, as in test_decode_vfpu.c. */
+    expect(0xF1828180u, "psp_vtfm(0, 1, 2, 4);");       /* vtfm4.q */
+    expect(0xF1828100u, "psp_vhtfm(0, 1, 2, 4);");      /* vhtfm4: .t vector */
+    expect(0xF1028100u, "psp_vtfm(0, 1, 2, 3);");       /* vtfm3.t */
+    expect(0xF1020180u, "psp_vhtfm(0, 1, 2, 3);");      /* vhtfm3: .p vector */
+    expect(0xF0820180u, "psp_vtfm(0, 1, 2, 2);");       /* vtfm2.p */
+    expect(0xF0820100u, "psp_vhtfm(0, 1, 2, 2);");      /* vhtfm2: .s vector */
+    reject(0xF1828100u, "psp_vtfm(");
+    {
+        const uint32_t bad[2] = { 0xF1820180u, 0xF0828180u };   /* vtfm4 .p, vtfm2 .q */
+        for (int i = 0; i < 2; i++) {
+            const char *src = emit_one(bad[i]);
+            if (!strstr(src, "psp_unimplemented(0x08804000u,") || strstr(src, "tfm(")) {
+                printf("FAIL 0x%08X: a transform with a bad width must be unimplemented\n", bad[i]);
+                failures++;
+            }
+        }
+    }
+
     /* Conversions carry their scale (bits 20..16) and the four f2i forms differ
      * only in the rounding mode; the packing family goes through psp_vpack
      * with the source width. pspas words, except the vc2i/vus2i/vi2c/vi2us
@@ -239,6 +262,7 @@ int main(void) {
             { 0xDF800001u, A_VFIM,  "psp_vimm("   },
             { 0xF0008080u, A_VMMUL, "psp_vmmul("  },
             { 0xF1808080u, A_VTFM4, "psp_vtfm("   },
+            { 0xF1828100u, A_VHTFM4,"psp_vhtfm("  },
             { 0xF2008080u, A_VMSCL, "psp_vmscl("  },
             { 0xF3838080u, A_VMIDT, "psp_vmidt("  },
             { 0xF3868080u, A_VMZERO,"psp_vmzero(" },
