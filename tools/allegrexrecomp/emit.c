@@ -630,7 +630,9 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
     case A_SYSCALL:
         fprintf(f, "%spsp_syscall(0x%05Xu);\n", ind, (in->raw >> 6) & 0xFFFFF); return;
     case A_BREAK:
-        fprintf(f, "%spsp_unimplemented(0x%08Xu, \"break\");\n", ind, in->addr); return;
+        /* The game's own trap (asserts). Not a translation gap: the host
+         * decides what a guest break means. */
+        fprintf(f, "%spsp_break(0x%08Xu, 0x%05Xu);\n", ind, in->addr, (in->raw >> 6) & 0xFFFFF); return;
 
     default:
         break;
@@ -1107,9 +1109,10 @@ static void emit_header(FILE *f, const a_analysis *an, const emit_opts *o) {
         "void psp_recomp_register(void);\n"
         "\n"
         "/* Provided by the host: a firmware call this module imports, and the\n"
-        " * traps for anything not yet translated. */\n"
+        " * traps for anything not yet translated, and for the guest's own `break`. */\n"
         "void psp_syscall(uint32_t id);\n"
         "void psp_unimplemented(uint32_t addr, const char *what);\n"
+        "void psp_break(uint32_t addr, uint32_t code);\n"
         "\n");
 
     for (int i = 0; i < an->nfuncs; i++)

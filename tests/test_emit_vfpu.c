@@ -69,6 +69,10 @@ static void expect_order(uint32_t word, const char *first, const char *then) {
 }
 
 int main(void) {
+    /* break is SPECIAL funct 0x0D with the code in bits 25..6: break 0x700
+     * is 0x700 << 6 | 0x0D. It is the game's own trap, not a translation gap. */
+    expect(0x0001C00Du, "psp_break(0x08804000u, 0x00700u);");
+
     /* vcst takes its constant index from bits 20..16 (vimm5), not from vs.
      * pspas: vcst.s S000, VFPU_PI = 0xD0690000; the game's 2/pi is 0xD0650024. */
     expect(0xD0690000u, "psp_vcst(0, 9, 1);");
