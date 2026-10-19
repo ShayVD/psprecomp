@@ -253,9 +253,11 @@ static inline int psp_fcmp(unsigned cond, float a, float b) {
  * beyond int32 saturate. (Our reading of the hardware; P2's oracle checks
  * it.) Written without fenv, so the host's rounding mode does not matter,
  * and without a C float-to-int cast of an out-of-range value, which is
- * undefined behaviour. Takes a double so callers can pre-scale exactly. */
+ * undefined behaviour. Takes a double so callers can pre-scale exactly.
+ * P2 note: denormal inputs are not flushed (a denormal rounded up gives 1); a
+ * flush-to-zero VFPU/FPU or a Vita host with FPSCR.FZ set would differ. */
 static inline int32_t psp_cvt_w(double x, int rm) {
-    if (x != x) return INT32_MAX;
+    if (isnan(x)) return INT32_MAX;               /* not x != x: survives -ffinite-math-only */
     double r;
     switch (rm & 3) {
     case 1:  r = x < 0 ? ceil(x) : floor(x); break;

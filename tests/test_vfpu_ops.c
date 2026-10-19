@@ -380,6 +380,8 @@ static void test_cvt_w(void) {
     }
     CHECK(psp_cvt_w(2147483646.5, 0) == 2147483646, "cvt_w tie near the top rounds to even");
     CHECK(psp_cvt_w(-2147483648.5, 0) == INT32_MIN && psp_cvt_w(-2147483648.5, 2) == INT32_MIN, "cvt_w below min");
+    /* Denormal inputs are not flushed: vf2iu of a denormal float is 1. */
+    CHECK(psp_cvt_w((double)1e-40f, 2) == 1 && psp_cvt_w((double)-1e-40f, 3) == -1, "cvt_w denormal");
     CHECK(psp_cvt_w(1.0, 5) == 1 && psp_cvt_w(1.5, 4) == 2, "cvt_w uses only the low two mode bits");
 }
 
@@ -503,15 +505,20 @@ static void test_conversion_prefixes(void) {
     psp_vfpu_reset();
     psp_vfpu_set_trap_handler(count_trap);
 
+    /* vf2i* traps on vpfxs too: its semantics on this op are unverified and
+     * the game never uses one. The destination stays untouched. */
     const float f[4] = { 1.0f, 2.0f, 3.0f, 4.0f };
+    const uint32_t keep[4] = { 77, 77, 77, 77 };
+    g_traps = 0;
     set4(0x01u, 4, f);
+    set_bits(0x00u, 4, keep);
     psp_vfpu_set_prefix(PSP_VPFX_S, 0x1B);                 /* [W, Z, Y, X] */
     psp_vf2i(1, 0x00u, 0x01u, 0, 4);
     get_bits(0x00u, 4, o);
-    CHECK(o[0] == 4 && o[1] == 3 && o[2] == 2 && o[3] == 1 && !psp_vfpu_prefix_pending(),
-          "vf2iz with vpfxs: %u %u %u %u", o[0], o[1], o[2], o[3]);
+    CHECK(g_traps == 1 && g_trap_what && !strcmp(g_trap_what, "vf2i with vpfxs/vpfxt") &&
+          o[0] == 77 && o[1] == 77 && o[2] == 77 && o[3] == 77 && !psp_vfpu_prefix_pending(),
+          "vf2iz with vpfxs traps and writes nothing (%d): %u %u %u %u", g_traps, o[0], o[1], o[2], o[3]);
 
-    const uint32_t keep[4] = { 77, 77, 77, 77 };
     const uint32_t ints[4] = { 1, 2, 3, 4 };
     g_traps = 0;
     set_bits(0x00u, 4, keep); set_bits(0x01u, 4, ints);
@@ -586,6 +593,65 @@ static void test_conversion_prefixes(void) {
     psp_vfpu_reset();
 }
 
+/* Destination addressing: the result width differs from the source width, and
+ * vd 0x20/0x40 are where single, pair and quad addressing differ. Every lane
+ * of the register file starts at 77; only the result lanes may change. */
+static void fill77(void) {
+    for (size_t i = 0; i < sizeof psp_cpu.v / sizeof psp_cpu.v[0]; i++) psp_cpu.v[i] = psp_bits_to_f32(77u);
+}
+static float snap[128];                       /* the register file once the source is in place */
+static void snapshot(void) { memcpy(snap, psp_cpu.v, sizeof snap); }
+static int only_lanes_changed(uint32_t vd, int n, const uint32_t *want, char *why, size_t whylen) {
+    int r[4], mine[128] = { 0 };
+    psp_vfpu_regs(vd, n, r);
+    for (int i = 0; i < n; i++) {
+        mine[r[i]] = 1;
+        if (psp_f32_to_bits(psp_cpu.v[r[i]]) != want[i]) {
+            snprintf(why, whylen, "lane %d is 0x%08X, want 0x%08X", i, psp_f32_to_bits(psp_cpu.v[r[i]]), want[i]);
+            return 0;
+        }
+    }
+    for (size_t i = 0; i < sizeof psp_cpu.v / sizeof psp_cpu.v[0]; i++)
+        if (!mine[i] && psp_f32_to_bits(psp_cpu.v[i]) != psp_f32_to_bits(snap[i])) {
+            snprintf(why, whylen, "register %zu outside the result was written", i);
+            return 0;
+        }
+    return 1;
+}
+
+static void test_pack_destination_lanes(void) {
+    static const uint32_t vds[] = { 0x00u, 0x20u, 0x40u, 0x60u, 0x22u };
+    char why[96];
+    psp_vfpu_reset();
+    for (size_t k = 0; k < sizeof vds / sizeof vds[0]; k++) {
+        const uint32_t vd = vds[k], vs = 0x0Cu;                  /* vs clear of every vd above */
+        {   /* vi2uc.q: one result word */
+            const uint32_t q[4] = { 0x7F800000u, 0x00800000u, 0xFF800000u, 0x3FFFFFFFu }, want[1] = { 0x7F0001FFu };
+            fill77(); set_bits(vs, 4, q); snapshot();
+            psp_vpack(PSP_VP_I2UC, vd, vs, 4);
+            CHECK(only_lanes_changed(vd, 1, want, why, sizeof why), "vi2uc.q into 0x%02X: %s", vd, why);
+        }
+        {   /* vi2s.q: two result words */
+            const uint32_t q[4] = { 0x12345678u, 0xFEDCBA98u, 0x7FFFFFFFu, 0x00010000u }, want[2] = { 0xFEDC1234u, 0x00017FFFu };
+            fill77(); set_bits(vs, 4, q); snapshot();
+            psp_vpack(PSP_VP_I2S, vd, vs, 4);
+            CHECK(only_lanes_changed(vd, 2, want, why, sizeof why), "vi2s.q into 0x%02X: %s", vd, why);
+        }
+        {   /* vuc2i.s: a single word widens to four */
+            const uint32_t one[1] = { 0x80FF0001u }, want[4] = { 0x00808080u, 0, 0x7FFFFFFFu, 0x40404040u };
+            fill77(); set_bits(vs, 1, one); snapshot();
+            psp_vpack(PSP_VP_UC2I, vd, vs, 1);
+            CHECK(only_lanes_changed(vd, 4, want, why, sizeof why), "vuc2i.s into 0x%02X: %s", vd, why);
+        }
+        {   /* vs2i.s: a single word widens to two */
+            const uint32_t one[1] = { 0x8000FFFFu }, want[2] = { 0xFFFF0000u, 0x80000000u };
+            fill77(); set_bits(vs, 1, one); snapshot();
+            psp_vpack(PSP_VP_S2I, vd, vs, 1);
+            CHECK(only_lanes_changed(vd, 2, want, why, sizeof why), "vs2i.s into 0x%02X: %s", vd, why);
+        }
+    }
+}
+
 int main(void) {
     psp_vfpu_reset();
     test_moves();
@@ -599,6 +665,7 @@ int main(void) {
     test_cvt_w();
     test_conversions();
     test_conversion_prefixes();
+    test_pack_destination_lanes();
     printf("%s\n", failures ? "test_vfpu_ops: FAILED" : "test_vfpu_ops: ok");
     return failures ? 1 : 0;
 }

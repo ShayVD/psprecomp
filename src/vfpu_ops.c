@@ -108,48 +108,55 @@ void psp_vslt(uint32_t vd, uint32_t vs, uint32_t vt, int size) { compare_set(vd,
 
 /* ---- conversions and packing --------------------------------------------- */
 
-/* Prefix policy. The game has no site of the vf2i forms, vi2f or the packing ops with a
- * pending vpfxs or vpfxt (counted in the generated code), so semantics we
- * cannot verify trap rather than guess:
- *  - vf2i*: vpfxs applies element-wise to the float source (UNVERIFIED).
- *  - vi2f and the packing ops: the source lanes are integer bits, and
- *    abs/neg/constants/swizzle on them are unverified: vpfxs traps.
+/* Prefix policy. The game has no site of the vf2i forms, vi2f or the packing
+ * ops with a pending vpfxs, vpfxt or vpfxd (counted in the generated code), so
+ * what we cannot verify traps rather than guesses:
+ *  - vpfxs traps on all of them. For vi2f and the packing ops the source lanes
+ *    are integer bits, so abs/neg/constants on them are doubtful; for vf2i* it
+ *    is plausible element-wise but equally unverified.
  *  - none has a vt operand, so a pending vpfxt is not ours to interpret: trap.
- *  - vpfxd masks destination lanes. An integer result is written with
- *    vfpu_write_bits (the mask applies, saturation does not); vi2f's float
- *    result goes through vfpu_write like any float. UNVERIFIED. */
-static int conv_prefix_trap(const char *what, int s_too) {
-    if (!vfpu_prefix_is_set(PSP_VPFX_T) && !(s_too && vfpu_prefix_is_set(PSP_VPFX_S))) return 0;
+ *  - vpfxd is the one destination mechanism every op shares, so it is applied
+ *    as everywhere else: it masks destination lanes. An integer result goes
+ *    through vfpu_write_bits (mask, no saturation); vi2f's float result goes
+ *    through vfpu_write, so a saturation mode applies. Whether hardware does
+ *    the same for conversions is unverified, as for the other ops.
+ * P2 note: denormal inputs are not flushed here (vf2iu of a denormal float is
+ * 1). A VFPU that flushes denormals to zero, or a Vita host with FPSCR.FZ set,
+ * would differ. */
+static int conv_prefix_trap(const char *what) {
+    if (!vfpu_prefix_is_set(PSP_VPFX_S) && !vfpu_prefix_is_set(PSP_VPFX_T)) return 0;
     vfpu_end();
     vfpu_trap(what);
     return 1;
 }
 
 void psp_vf2i(int rm, uint32_t vd, uint32_t vs, uint32_t scale, int size) {
-    if (conv_prefix_trap("vf2i with vpfxt", 0)) return;
+    if (conv_prefix_trap("vf2i with vpfxs/vpfxt")) return;
     const int n = vfpu_width(size);
     float s[4];
     uint32_t d[4];
+    const double k = ldexp(1.0, (int)scale);       /* 2^scale; the products below are exact in double */
     vfpu_read(PSP_VPFX_S, vs, n, s);
     for (int i = 0; i < n; i++)
-        d[i] = (uint32_t)psp_cvt_w(ldexp((double)s[i], (int)scale), rm);   /* exact in double */
+        d[i] = (uint32_t)psp_cvt_w((double)s[i] * k, rm);
     vfpu_write_bits(vd, n, d);
     vfpu_end();
 }
 
 void psp_vi2f(uint32_t vd, uint32_t vs, uint32_t scale, int size) {
-    if (conv_prefix_trap("vi2f with vpfxs/vpfxt", 1)) return;
+    if (conv_prefix_trap("vi2f with vpfxs/vpfxt")) return;
     const int n = vfpu_width(size);
     float s[4], d[4];
+    const double k = ldexp(1.0, -(int)scale);      /* 2^-scale, exact */
     vfpu_read_raw(vs, n, s);
     for (int i = 0; i < n; i++)
-        d[i] = (float)ldexp((double)(int32_t)psp_f32_to_bits(s[i]), -(int)scale);
+        d[i] = (float)((double)(int32_t)psp_f32_to_bits(s[i]) * k);
     vfpu_write(vd, n, d);
     vfpu_end();
 }
 
 void psp_vpack(int op, uint32_t vd, uint32_t vs, int size) {
-    if (conv_prefix_trap("vpack with vpfxs/vpfxt", 1)) return;
+    if (conv_prefix_trap("vpack with vpfxs/vpfxt")) return;
     float sf[4] = { 0, 0, 0, 0 };
     uint32_t s[4], d[4] = { 0, 0, 0, 0 };
     int dn;
