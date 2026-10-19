@@ -671,7 +671,7 @@ static int load_and_discover(const char *path, const char *seeds_path, psp_blob 
                      : a_discover(an, seeds, nseeds);
     free(seeds);
     free(dseeds);
-    nseeds += ndseeds;
+    nseeds += ndseeds - st->prune.dropped;     /* the seeds discovery actually used */
     if (rc != 0) {
         fprintf(stderr, "discovery failed (out of memory)\n");
         psp_blob_free(b);
@@ -696,10 +696,15 @@ static int cmd_funcs(const char *path, int list, const char *seeds_path) {
     printf("module:     %s\n", path);
     printf("code:       0x%08X + %u bytes  (%u instructions)\n",
            an.base, an.size, an.size / 4);
-    printf("seeds:      %d (entry 0x%08X + %d exports + %d %s + %d address pairs + %d from file)\n",
-           st.nseeds, e.entry, st.nexports, st.nptr,
-           st.scanned ? "scanned data pointers (heuristic)" : "relocation pointers",
-           st.npair, st.nfile);
+    if (st.scanned)
+        printf("seeds:      %d used (entry 0x%08X + %d exports + %d of %d scanned data pointers "
+               "(heuristic) + %d address pairs + %d from file)\n",
+               st.nseeds, e.entry, st.nexports, st.nptr - st.prune.dropped, st.nptr,
+               st.npair, st.nfile);
+    else
+        printf("seeds:      %d (entry 0x%08X + %d exports + %d relocation pointers + "
+               "%d address pairs + %d from file)\n",
+               st.nseeds, e.entry, st.nexports, st.nptr, st.npair, st.nfile);
     if (st.nfile_ignored) printf("seeds file: %d ignored\n", st.nfile_ignored);
     if (st.scanned)
         printf("pruned:     dropped %d jump-table words from the data-pointer seeds "

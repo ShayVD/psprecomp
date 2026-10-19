@@ -41,6 +41,12 @@ static uint32_t bgez(int rs, uint32_t pc, uint32_t target) {   /* REGIMM rt=1 */
     return R(0x01, rs, 1, (int)((target - (pc + 4)) >> 2));
 }
 static uint32_t j_(uint32_t target) { return 0x02u << 26 | ((target >> 2) & 0x03FFFFFFu); }
+static uint32_t regimm(int rs, int sub, uint32_t pc, uint32_t target) {
+    return R(0x01, rs, sub, (int)((target - (pc + 4)) >> 2));
+}
+static uint32_t blezl(int rs, uint32_t pc, uint32_t target) {
+    return R(0x16, rs, 0, (int)((target - (pc + 4)) >> 2));
+}
 #define JR_RA 0x03E00008u
 #define AT 1
 #define V0 2
@@ -814,17 +820,85 @@ int main(void) {
     check_always("beq $a1, $a1", "t_always_beq", beq(A1, A1, BASE, BASE + 0x18));
     check_always("bgez $zero", "t_always_bgez", bgez(0, BASE, BASE + 0x18));
     check_always("beql $zero, $zero", "t_always_beql", beql(0, 0, BASE, BASE + 0x18));
+    check_always("blez $zero", "t_always_blez", blez(0, BASE, BASE + 0x18));
+    check_always("bgezl $zero", "t_always_bgezl", regimm(0, 0x03, BASE, BASE + 0x18));
+    check_always("blezl $zero", "t_always_blezl", blezl(0, BASE, BASE + 0x18));
+
+    /* Not always-taken: `bal` (bgezal $zero) is a call and returns, and
+     * `bne $x, $x` is never taken. Both run on to 0x08. */
+    {
+        const uint32_t brs[2] = { regimm(0, 0x11, BASE, BASE + 0x18), bne(A1, A1, BASE, BASE + 0x18) };
+        for (int k = 0; k < 2; k++) {
+            memset(g_w, 0, sizeof g_w);
+            g_w[0x00 / 4] = brs[k];
+            g_w[0x08 / 4] = ori(V0, 0, 1); g_w[0x0C / 4] = JR_RA;
+            g_w[0x18 / 4] = JR_RA; g_w[0x1C / 4] = ori(V0, 0, 2);
+            store();
+            uint32_t s0 = BASE;
+            setup(&an, 0x20);
+            CHECK(a_discover(&an, &s0, 1) == 0, "discover (not always %d)", k);
+            CHECK(an.owner[0x08 / 4] == BASE, "%s runs on", k ? "bne $x,$x" : "bal");
+            a_analysis_free(&an);
+        }
+    }
+
+    /* A delay slot's own copy (it is a branch target) after a conditional
+     * branch or a call: the path that does not take the branch, or returns
+     * from the call, continues at a + 8 -- here another function's entry. */
+    for (int k = 0; k < 2; k++) {
+        memset(g_w, 0, sizeof g_w);
+        g_w[0x00 / 4] = bne(A1, 0, BASE, BASE + 0x0C);
+        g_w[0x08 / 4] = k ? jal(BASE + 0x40) : bne(A0, 0, BASE + 0x08, BASE + 0x20);
+        g_w[0x0C / 4] = ori(V0, V0, 1);              /* the slot, and a branch target */
+        g_w[0x10 / 4] = JR_RA; g_w[0x14 / 4] = ori(V0, 0, 9);   /* another function */
+        g_w[0x20 / 4] = JR_RA;
+        g_w[0x40 / 4] = JR_RA;
+        store();
+        uint32_t sd[2] = { BASE, BASE + 0x10 };
+        setup(&an, 0x48);
+        CHECK(a_discover(&an, sd, 2) == 0, "discover (slot alias %d)", k);
+        const char *src = emit_source(&an, k ? "t_alias_jal" : "t_alias_br");
+        const char *body = strstr(src, "static void psp_body_08804000");
+        const char *lbl = body ? strstr(body, "L_0880400C:") : NULL;
+        const char *call = body ? strstr(body, "psp_func_08804010()") : NULL;
+        CHECK(lbl && call && call < lbl, "%s: the path past it reaches 0x08804010",
+              k ? "jal" : "branch");
+        a_analysis_free(&an);
+    }
+
+    /* A delay-slot address arrived at again starts the walk after it only if
+     * this function walked the transfer that owns the slot: here 0x10 is a
+     * dead branch, and 0x14 (reached twice, by branches) an undecodable word
+     * that ends the walk -- 0x18 must stay unwalked. */
+    {
+        memset(g_w, 0, sizeof g_w);
+        g_w[0x00 / 4] = beq(A0, 0, BASE, BASE + 0x14);
+        g_w[0x08 / 4] = beq(0, 0, BASE + 0x08, BASE + 0x20);
+        g_w[0x10 / 4] = beq(A3, 0, BASE + 0x10, BASE + 0x30);   /* never walked */
+        g_w[0x14 / 4] = 0x0000003Fu;
+        g_w[0x18 / 4] = ori(V0, 0, 1); g_w[0x1C / 4] = JR_RA;
+        g_w[0x20 / 4] = beq(A2, 0, BASE + 0x20, BASE + 0x14);
+        g_w[0x28 / 4] = JR_RA;
+        store();
+        uint32_t s0 = BASE;
+        setup(&an, 0x40);
+        CHECK(a_discover(&an, &s0, 1) == 0, "discover (dead slot)");
+        CHECK(an.owner[0x10 / 4] == A_NO_OWNER && an.owner[0x18 / 4] == A_NO_OWNER,
+              "not a slot of a walked transfer: nothing after it walked");
+        a_analysis_free(&an);
+    }
 
     /* A body whose last instruction can fall through, into code that is no
-     * function (here an undecodable word stops the walk), transfers there
-     * explicitly instead of returning as if it had finished. */
+     * function (here the end of the code), transfers there explicitly
+     * instead of returning as if it had finished. */
     {
         memset(g_w, 0, sizeof g_w);
         g_w[0x00 / 4] = ori(V0, 0, 1);
-        g_w[0x04 / 4] = 0x0000003Fu;            /* not an instruction */
+        g_w[0x04 / 4] = ori(V0, V0, 2);         /* the last word of the code */
         store();
         uint32_t s0 = BASE;
-        setup(&an, 0x10);
+        setup(&an, 0x08);
+        an.size = 0x08;
         CHECK(a_discover(&an, &s0, 1) == 0, "discover (runs off)");
         const char *src = emit_source(&an, "t_runs_off");
         CHECK(strstr(src, "psp_dispatch(0x08804008u);  /* not discovered */") != NULL,

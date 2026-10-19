@@ -606,12 +606,14 @@ static int trace_function(walk_ctx *c, uint32_t entry, a_func *out) {
                  * exactly like a branch into another function's block. */
                 if (c->owner[idx] != c->cur_owner && !c->entry_map[idx]) {
                     u32_push(c->cross, a);
-                } else if (first && c->owner[idx] == c->cur_owner && a_in_range(an, a - 4)) {
+                } else if (first && c->owner[idx] == c->cur_owner && a_in_range(an, a - 4) &&
+                           (c->seen[idx - 1] & SEEN_CODE) && c->owner[idx - 1] == c->cur_owner) {
                     /* A branch into one of this function's delay slots, walked
-                     * with its transfer. Arriving by the branch, the slot runs
-                     * as an ordinary instruction and execution carries on after
-                     * it -- which nothing else may reach (after a `b` or a
-                     * `j`, say). */
+                     * with its transfer (this function walked the transfer
+                     * too). Arriving by the branch, the slot runs as an
+                     * ordinary instruction and execution carries on after it
+                     * -- which nothing else may reach (after a `b` or a `j`,
+                     * say). */
                     a_insn prev;
                     a_decode(fetch(an, a - 4), a - 4, &prev);
                     if (prev.has_delay_slot) { first = 0; a += 4; continue; }
@@ -760,7 +762,7 @@ static int trace_function(walk_ctx *c, uint32_t entry, a_func *out) {
                  * follows its delay slot is only reached through its own
                  * labels, and walking on into it would claim it for this
                  * function -- the case blocks of a switch, typically. */
-                if (a_always_taken(&in) && !in.is_call) break;
+                if (a_always_taken(&in)) break;     /* never a call: bal is not one */
                 a += 8;
                 continue;
             }
@@ -1102,9 +1104,15 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
      * always get their re-walk, and terminate because a rejected site never
      * gets a table again. When nothing changes, the last walk's results
      * (functions, unresolved sites, tables) stand as they are. */
+    int warned_cap = 0;
     for (int round = 0; ; round++) {
     if (round > 0) {
         int added = 0;
+        if (round >= 8 && cross.n && !warned_cap) {
+            fprintf(stderr, "discovery: round cap reached, %d cross-function targets not "
+                            "promoted (they may miss at run time)\n", cross.n);
+            warned_cap = 1;
+        }
         for (int i = 0; round < 8 && i < cross.n; i++) {
             uint32_t t = cross.v[i];
             if (!a_in_range(an, t)) continue;
@@ -1315,64 +1323,82 @@ static int case_reached(const a_analysis *an, const uint64_t *lc, int nlc, uint3
     return 0;
 }
 
+typedef struct { uint32_t value; int idx; } seed_ref;
+
+static int cmp_seed_ref(const void *a, const void *b) {
+    const seed_ref *x = (const seed_ref *)a, *y = (const seed_ref *)b;
+    if (x->value != y->value) return (x->value > y->value) - (x->value < y->value);
+    return (x->idx > y->idx) - (x->idx < y->idx);
+}
+
 int a_discover_pruned(a_analysis *an, const uint32_t *seeds, int nseeds,
                       const a_data_seed *ds, int nds, a_prune_stats *ps) {
     memset(ps, 0, sizeof *ps);
     const a_analysis in = *an;                  /* the inputs, for every run */
     uint32_t *other = (uint32_t *)malloc(((size_t)nseeds + 1) * sizeof *other);
     uint32_t *all = (uint32_t *)malloc(((size_t)nseeds + (size_t)nds + 1) * sizeof *all);
-    uint8_t *drop = (uint8_t *)calloc((size_t)nds + 1, 1);
+    seed_ref *ord = (seed_ref *)malloc(((size_t)nds + 1) * sizeof *ord);
+    uint8_t *drop = (uint8_t *)calloc((size_t)nds + 1, 1);   /* per value group */
     uint8_t *keep = (uint8_t *)calloc((size_t)nds + 1, 1);   /* never drop again */
     int rc = -1;
-    if (!other || !all || !drop || !keep) goto out;
+    if (!other || !all || !ord || !drop || !keep) goto out;
     if (nseeds) memcpy(other, seeds, (size_t)nseeds * sizeof *other);
     qsort(other, (size_t)nseeds, sizeof *other, cmp_u32);
 
     /* By value: the scan finds the same address in several words, and a
-     * value is dropped only if every word holding it is a table entry. */
-    uint32_t *vals = (uint32_t *)malloc(((size_t)nds + 1) * sizeof *vals);
-    if (!vals) goto out;
+     * value is dropped only if every word holding it is a table entry. The
+     * seeds sorted by value make each value one run of `ord`; drop/keep are
+     * kept on the run's first element. */
+    for (int i = 0; i < nds; i++) { ord[i].value = ds[i].value; ord[i].idx = i; }
+    qsort(ord, (size_t)nds, sizeof *ord, cmp_seed_ref);
+
     for (;;) {
         int n = 0;
         for (int i = 0; i < nseeds; i++) all[n++] = seeds[i];
-        for (int i = 0; i < nds; i++) if (!drop[i]) all[n++] = ds[i].value;
+        for (int g = 0; g < nds; ) {
+            int e = g;
+            while (e < nds && ord[e].value == ord[g].value) e++;
+            if (!drop[g]) for (int k = g; k < e; k++) all[n++] = ord[k].value;
+            g = e;
+        }
         if (ps->passes) a_analysis_free(an);
         *an = in;
-        if (a_discover(an, all, n) != 0) { free(vals); goto out; }
+        if (a_discover(an, all, n) != 0) goto out;
         ps->passes++;
 
-        /* Put back every dropped value whose code this run lost. */
-        int restored = 0, nlc = 0;
+        /* Put back every dropped value whose code this run lost, and find
+         * the values this run's tables justify dropping. */
+        int restored = 0, added = 0, nlc = 0;
         uint64_t *lc = local_cases(an, &nlc);
-        if (!lc) { free(vals); goto out; }
-        for (int i = 0; i < nds; i++) {
-            if (!drop[i] || case_reached(an, lc, nlc, ds[i].value)) continue;
-            for (int j = 0; j < nds; j++)
-                if (ds[j].value == ds[i].value && drop[j]) {
-                    drop[j] = 0; keep[j] = 1; restored++;
-                }
+        if (!lc) goto out;
+        for (int g = 0; g < nds; ) {
+            int e = g;
+            while (e < nds && ord[e].value == ord[g].value) e++;
+            const uint32_t v = ord[g].value;
+            if (drop[g] && !case_reached(an, lc, nlc, v)) {
+                drop[g] = 0; keep[g] = 1; restored += e - g;
+            } else if (!drop[g] && !keep[g] && ps->passes < PRUNE_PASSES &&
+                       !has_u32(other, nseeds, v)) {
+                int only_tables = 1;            /* every word holding v is a table entry */
+                for (int k = g; k < e && only_tables; k++)
+                    only_tables = in_table(an, ds[ord[k].idx].source);
+                if (only_tables) { drop[g] = 1; added += e - g; }
+            }
+            g = e;
         }
         free(lc);
         ps->restored += restored;
-
-        /* Values this run's tables justify dropping. */
-        int added = 0;
-        if (ps->passes < PRUNE_PASSES) {
-            int nv = 0;
-            for (int i = 0; i < nds; i++)
-                if (keep[i] || has_u32(other, nseeds, ds[i].value) || !in_table(an, ds[i].source))
-                    vals[nv++] = ds[i].value;            /* held somewhere it must stay */
-            qsort(vals, (size_t)nv, sizeof *vals, cmp_u32);
-            for (int i = 0; i < nds; i++)
-                if (!drop[i] && !has_u32(vals, nv, ds[i].value)) { drop[i] = 1; added++; }
-        }
         if (!restored && !added) break;
     }
-    free(vals);
-    for (int i = 0; i < nds; i++) ps->dropped += drop[i];
+    for (int g = 0; g < nds; ) {
+        int e = g;
+        while (e < nds && ord[e].value == ord[g].value) e++;
+        if (drop[g]) ps->dropped += e - g;
+        g = e;
+    }
     rc = 0;
 out:
-    free(other); free(all); free(drop); free(keep);
+    free(other); free(all); free(ord); free(drop); free(keep);
     return rc;
 }
 

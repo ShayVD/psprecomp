@@ -57,6 +57,32 @@ static void setup(a_analysis *an) {
     an->image_size = sizeof g_code;
 }
 
+/* Two switches with the same idiom, `sltiu a2,a0,3; beq a2,zero,0x80;
+ * sll a1,a0,2; lui/addu/lw at; jr at`: S1 at `s1`, S2 at `s2`, tables T1 at
+ * 0xD0 and T2 at 0xE0 (entries t1[], t2[]), cases `jr ra; nop` at `cases`. */
+static void put(uint32_t *w, uint32_t off, uint32_t v) { w[off / 4] = v; }
+static void put_switch(uint32_t *w, uint32_t at, uint32_t table) {
+    put(w, at + 0x00, R(0x0B, 4, 6, 3));
+    put(w, at + 0x04, R(0x04, 6, 0, (int)((0x80 - (at + 0x08)) / 4)));
+    put(w, at + 0x08, 4u << 16 | 5u << 11 | 2u << 6);                  /* sll a1,a0,2 */
+    put(w, at + 0x0C, R(0x0F, 0, 1, (int)((table + 0x8000u) >> 16)));
+    put(w, at + 0x10, 1u << 21 | 5u << 16 | 1u << 11 | 0x21);          /* addu at,at,a1 */
+    put(w, at + 0x14, R(0x23, 1, 1, (int)(int16_t)(table & 0xFFFF)));
+    put(w, at + 0x18, 1u << 21 | 0x08);
+}
+static void build2(uint32_t s1, uint32_t s2, const uint32_t t1[3], const uint32_t t2[3],
+                   const uint32_t *cases, int ncases) {
+    uint32_t w[0x110 / 4];
+    memset(w, 0, sizeof w);
+    put_switch(w, s1, BASE + 0xD0);
+    put_switch(w, s2, BASE + 0xE0);
+    for (int i = 0; i < ncases; i++) put(w, cases[i] - BASE, JR_RA);
+    put(w, 0x80, JR_RA);
+    for (int k = 0; k < 3; k++) { w[0xD0 / 4 + k] = t1[k]; w[0xE0 / 4 + k] = t2[k]; }
+    for (size_t k = 0; k < sizeof w / 4; k++)
+        for (int b = 0; b < 4; b++) g_code[k * 4 + b] = (uint8_t)(w[k] >> (8 * b));
+}
+
 static int is_func(const a_analysis *an, uint32_t a) {
     for (int i = 0; i < an->nfuncs; i++) if (an->funcs[i].addr == a) return 1;
     return 0;
@@ -83,6 +109,7 @@ int main(void) {
         CHECK(an.nfuncs == 1, "cases inside the switch's function, got %d functions", an.nfuncs);
         CHECK(an.njtables == 1, "table recovered, got %d", an.njtables);
         CHECK(ps.dropped == 3 && ps.restored == 0, "dropped %d restored %d", ps.dropped, ps.restored);
+        CHECK(ps.passes == 2, "two passes, got %d", ps.passes);
         CHECK(an.owner[0x20 / 4] == BASE && an.owner[0x2C / 4] == BASE && an.owner[0x3C / 4] == BASE,
               "cases owned by BASE");
         a_analysis_free(&an);
@@ -111,8 +138,54 @@ int main(void) {
         nds = a_scan_data_seeds(&an, g_code + 0x100, 0x0C, TABLE, ds, 8);
         CHECK(a_discover_pruned(&an, NULL, 0, ds, nds, &ps) == 0, "discover (restore)");
         CHECK(ps.dropped == 0 && ps.restored == 3, "dropped %d restored %d", ps.dropped, ps.restored);
+        CHECK(ps.passes == 3, "three passes, got %d", ps.passes);
         CHECK(an.njtables == 1 && is_func(&an, BASE) && an.owner[0x2C / 4] != A_NO_OWNER &&
               an.owner[0x3C / 4] != A_NO_OWNER, "switch and cases reached");
+        a_analysis_free(&an);
+    }
+
+    /* A table that only stands once another table's words are dropped. S1's
+     * first case is S2's beq (S2's sltiu sits right after S1's jr). Seeded
+     * from the data, that case is an entry: entered from anywhere, S2's beq
+     * tests a $a2 nothing bounded, so S2 is rejected. Without the seed the
+     * case is reached only through S1's jr, whose path carries S1's bound on
+     * the same $a0 -- S2 stands, and its words go in a third pass. */
+    {
+        const uint32_t t1[3] = { BASE + 0x24, BASE + 0x50, BASE + 0x58 };
+        const uint32_t t2[3] = { BASE + 0x60, BASE + 0x68, BASE + 0x70 };
+        const uint32_t cases[5] = { BASE + 0x50, BASE + 0x58, BASE + 0x60, BASE + 0x68, BASE + 0x70 };
+        build2(0x00, 0x20, t1, t2, cases, 5);
+        setup(&an);
+        an.scan_size = 0x88;
+        nds = a_scan_data_seeds(&an, g_code + 0xD0, 0x20, BASE + 0xD0, ds, 8);
+        uint32_t seed = BASE;
+        CHECK(a_discover_pruned(&an, &seed, 1, ds, nds, &ps) == 0, "discover (multi-pass)");
+        CHECK(ps.passes == 3 && ps.dropped == 6 && ps.restored == 0,
+              "multi-pass: passes %d dropped %d restored %d", ps.passes, ps.dropped, ps.restored);
+        CHECK(an.njtables == 2 && an.nfuncs == 1, "multi-pass: %d tables, %d functions",
+              an.njtables, an.nfuncs);
+        a_analysis_free(&an);
+    }
+
+    /* One case shared by switches in two functions (0x60 in both tables):
+     * dropped, it is walked by one and promoted to an entry by the other. */
+    {
+        const uint32_t t1[3] = { BASE + 0x40, BASE + 0x48, BASE + 0x60 };
+        const uint32_t t2[3] = { BASE + 0x50, BASE + 0x58, BASE + 0x60 };
+        const uint32_t cases[5] = { BASE + 0x40, BASE + 0x48, BASE + 0x50, BASE + 0x58, BASE + 0x60 };
+        build2(0x00, 0x20, t1, t2, cases, 5);
+        setup(&an);
+        an.scan_size = 0x88;
+        nds = a_scan_data_seeds(&an, g_code + 0xD0, 0x20, BASE + 0xD0, ds, 8);
+        uint32_t seeds[2] = { BASE, BASE + 0x20 };
+        CHECK(a_discover_pruned(&an, seeds, 2, ds, nds, &ps) == 0, "discover (shared case)");
+        CHECK(ps.dropped == 6 && ps.restored == 0, "shared: dropped %d restored %d",
+              ps.dropped, ps.restored);
+        /* So is the shared default (0x80): BASE, 0x20, 0x60, 0x80. */
+        CHECK(an.njtables == 2 && is_func(&an, BASE + 0x60) && an.nfuncs == 4,
+              "shared: the shared case is an entry (%d tables, %d functions)", an.njtables, an.nfuncs);
+        CHECK(an.owner[0x40 / 4] == BASE && an.owner[0x50 / 4] == BASE + 0x20,
+              "shared: the other cases are blocks of their switch");
         a_analysis_free(&an);
     }
 

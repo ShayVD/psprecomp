@@ -79,7 +79,8 @@ foreach(_g IN ITEMS t_switch t_switch_entry t_switch_back t_switch_slot
                     t_switch_slot_bh t_switch_slot_lh t_switch_slot_jl
                     t_switch_slot_jj t_switch_slot_ja t_switch_slot_jr
                     t_always_b t_always_beq t_always_bgez t_always_beql t_runs_off
-                    t_slot_target t_slot_target_o t_strlen)
+                    t_slot_target t_slot_target_o t_strlen
+                    t_always_blez t_always_bgezl t_always_blezl t_alias_br t_alias_jal)
     add_test(NAME switch_cc_${_g}
              COMMAND ${CMAKE_C_COMPILER} -std=c11 -fsyntax-only
                      -I${CMAKE_SOURCE_DIR}/include ${_g}_funcs.c)

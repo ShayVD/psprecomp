@@ -529,8 +529,16 @@ static void emit_slot_alias(ectx *c, uint32_t a, const a_insn *slot, int falls_t
     const uint32_t after = a + 8;
 
     if (falls_through) {
-        if (owned_by(an, after, owner)) fprintf(c->out, "    goto L_%08X;\n", after);
-        else                            fprintf(c->out, "    return;\n");
+        /* The path that did not take the branch (or returned from the call)
+         * goes on at a + 8. Another function's code there is transferred to,
+         * as the gap handler does: returning would skip it. */
+        if (owned_by(an, after, owner)) {
+            fprintf(c->out, "    goto L_%08X;\n", after);
+        } else {
+            fprintf(c->out, "    /* falls into 0x%08X, owned by another function */\n", after);
+            emit_static_call(c, after);
+            fprintf(c->out, "    PSP_SP_CHECK(0x%08Xu);\n    return;\n", after);
+        }
     }
     fprintf(c->out, "L_%08X:\n", a + 4);
     comment(c, slot);
@@ -685,7 +693,7 @@ static void emit_function(ectx *c, const a_func *fn) {
         if (c->is_label[i]) fprintf(f, "L_%08X: PSP_MARK(0x%08Xu);\n", a, a);
         last_terminal = in.is_return || in.is_indirect ||
                         (in.is_jump && !in.is_call) ||
-                        (a_always_taken(&in) && !in.is_call);
+                        a_always_taken(&in);    /* never a call: bal is not one */
         comment(c, &in);
 
         /* The delay-slot instruction, if this transfers control. */
