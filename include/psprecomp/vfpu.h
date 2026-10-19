@@ -88,9 +88,19 @@ enum {
     PSP_VU_RCP, PSP_VU_RSQ, PSP_VU_SQRT, PSP_VU_SIN, PSP_VU_COS,
     PSP_VU_EXP2, PSP_VU_LOG2, PSP_VU_SAT0, PSP_VU_SAT1,
     PSP_VU_NRCP, PSP_VU_NSIN, PSP_VU_REXP2, PSP_VU_ASIN,
-    PSP_VU_F2IZ, PSP_VU_I2F
+    PSP_VU_F2IZ_UNUSED, PSP_VU_I2F_UNUSED    /* unused: see psp_vf2i / psp_vi2f, which take the scale */
 };
 void psp_vunary(int op, uint32_t vd, uint32_t vs, int size);
+
+/* vf2in/vf2iz/vf2iu/vf2id (rm 0/1/2/3, see psp_cvt_w) after scaling by
+ * 2^scale; vi2f divides by 2^scale. Prefixes: see vfpu_ops.c. */
+void psp_vf2i(int rm, uint32_t vd, uint32_t vs, uint32_t scale, int size);
+void psp_vi2f(uint32_t vd, uint32_t vs, uint32_t scale, int size);
+
+/* VFPU7 integer narrowing and widening. `size` is the source width. */
+enum { PSP_VP_I2UC, PSP_VP_I2C, PSP_VP_I2US, PSP_VP_I2S,
+       PSP_VP_UC2I, PSP_VP_C2I, PSP_VP_US2I, PSP_VP_S2I };
+void psp_vpack(int op, uint32_t vd, uint32_t vs, int size);
 
 /* Matrix ops that need no multiply: identity, zero, one, and copy. `size` is
  * the matrix order (2, 3 or 4). */

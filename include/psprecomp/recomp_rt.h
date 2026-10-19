@@ -16,6 +16,7 @@
 #include "cpu.h"
 #include "mem.h"
 
+#include <math.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -244,6 +245,32 @@ static inline int psp_fcmp(unsigned cond, float a, float b) {
     case 0x6: case 0xE: return !unordered && a <= b;           /* OLE, LE */
     default:            return unordered || a <= b;            /* ULE, NGT */
     }
+}
+
+/* Float to int32 as the PSP converts: rounding mode `rm` uses the MIPS FCR31
+ * encoding (0 nearest-even, 1 toward zero, 2 toward +inf, 3 toward -inf).
+ * NaN and +inf give 0x7FFFFFFF, -inf gives 0x80000000, and finite values
+ * beyond int32 saturate. (Our reading of the hardware; P2's oracle checks
+ * it.) Written without fenv, so the host's rounding mode does not matter,
+ * and without a C float-to-int cast of an out-of-range value, which is
+ * undefined behaviour. Takes a double so callers can pre-scale exactly. */
+static inline int32_t psp_cvt_w(double x, int rm) {
+    if (x != x) return INT32_MAX;
+    double r;
+    switch (rm & 3) {
+    case 1:  r = x < 0 ? ceil(x) : floor(x); break;
+    case 2:  r = ceil(x);  break;
+    case 3:  r = floor(x); break;
+    default: {
+        r = floor(x);
+        const double frac = x - r;
+        if (frac > 0.5 || (frac == 0.5 && fmod(r, 2.0) != 0.0)) r += 1.0;
+        break;
+    }
+    }
+    if (r >= 2147483647.0) return INT32_MAX;
+    if (r <= -2147483648.0) return INT32_MIN;
+    return (int32_t)r;
 }
 
 #ifdef __cplusplus

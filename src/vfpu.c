@@ -292,7 +292,6 @@ void psp_vunary(int op, uint32_t vd, uint32_t vs, int size) {
     vfpu_read(PSP_VPFX_S, vs, n, s);
 
     float out[4];
-    uint32_t bits[4];
     for (int i = 0; i < n; i++) {
         const float a = s[i];
         float r;
@@ -319,17 +318,11 @@ void psp_vunary(int op, uint32_t vd, uint32_t vs, int size) {
         case PSP_VU_LOG2: r = logf(a) * 1.4426950408889634f; break;   /* 1/ln2 */
         case PSP_VU_SAT0: r = sat0(a);      break;
         case PSP_VU_SAT1: r = sat1(a);      break;
-        /* Conversions move between the float and integer *interpretations* of
-         * a vector register; the bits are reinterpreted, not just cast. */
-        case PSP_VU_F2IZ: bits[i] = (uint32_t)(int32_t)a; r = 0.0f;  break;
-        case PSP_VU_I2F:  r = (float)(int32_t)psp_f32_to_bits(a);    break;
         default:          vfpu_end(); vfpu_trap("vunary"); return;
         }
         out[i] = r;
     }
-    /* An integer result takes the write mask but is never saturated. */
-    if (op == PSP_VU_F2IZ) vfpu_write_bits(vd, n, bits);
-    else                   vfpu_write(vd, n, out);
+    vfpu_write(vd, n, out);
     vfpu_end();
 }
 

@@ -105,3 +105,106 @@ static void compare_set(uint32_t vd, uint32_t vs, uint32_t vt, int size, int ge)
 }
 void psp_vsge(uint32_t vd, uint32_t vs, uint32_t vt, int size) { compare_set(vd, vs, vt, size, 1); }
 void psp_vslt(uint32_t vd, uint32_t vs, uint32_t vt, int size) { compare_set(vd, vs, vt, size, 0); }
+
+/* ---- conversions and packing --------------------------------------------- */
+
+/* Prefix policy. The game has no site of the vf2i forms, vi2f or the packing ops with a
+ * pending vpfxs or vpfxt (counted in the generated code), so semantics we
+ * cannot verify trap rather than guess:
+ *  - vf2i*: vpfxs applies element-wise to the float source (UNVERIFIED).
+ *  - vi2f and the packing ops: the source lanes are integer bits, and
+ *    abs/neg/constants/swizzle on them are unverified: vpfxs traps.
+ *  - none has a vt operand, so a pending vpfxt is not ours to interpret: trap.
+ *  - vpfxd masks destination lanes. An integer result is written with
+ *    vfpu_write_bits (the mask applies, saturation does not); vi2f's float
+ *    result goes through vfpu_write like any float. UNVERIFIED. */
+static int conv_prefix_trap(const char *what, int s_too) {
+    if (!vfpu_prefix_is_set(PSP_VPFX_T) && !(s_too && vfpu_prefix_is_set(PSP_VPFX_S))) return 0;
+    vfpu_end();
+    vfpu_trap(what);
+    return 1;
+}
+
+void psp_vf2i(int rm, uint32_t vd, uint32_t vs, uint32_t scale, int size) {
+    if (conv_prefix_trap("vf2i with vpfxt", 0)) return;
+    const int n = vfpu_width(size);
+    float s[4];
+    uint32_t d[4];
+    vfpu_read(PSP_VPFX_S, vs, n, s);
+    for (int i = 0; i < n; i++)
+        d[i] = (uint32_t)psp_cvt_w(ldexp((double)s[i], (int)scale), rm);   /* exact in double */
+    vfpu_write_bits(vd, n, d);
+    vfpu_end();
+}
+
+void psp_vi2f(uint32_t vd, uint32_t vs, uint32_t scale, int size) {
+    if (conv_prefix_trap("vi2f with vpfxs/vpfxt", 1)) return;
+    const int n = vfpu_width(size);
+    float s[4], d[4];
+    vfpu_read_raw(vs, n, s);
+    for (int i = 0; i < n; i++)
+        d[i] = (float)ldexp((double)(int32_t)psp_f32_to_bits(s[i]), -(int)scale);
+    vfpu_write(vd, n, d);
+    vfpu_end();
+}
+
+void psp_vpack(int op, uint32_t vd, uint32_t vs, int size) {
+    if (conv_prefix_trap("vpack with vpfxs/vpfxt", 1)) return;
+    float sf[4] = { 0, 0, 0, 0 };
+    uint32_t s[4], d[4] = { 0, 0, 0, 0 };
+    int dn;
+    vfpu_read_raw(vs, size >= 1 && size <= 4 ? size : 4, sf);
+    for (int i = 0; i < 4; i++) s[i] = psp_f32_to_bits(sf[i]);
+    switch (op) {
+    case PSP_VP_I2UC:
+        if (size != 4) goto bad;
+        dn = 1;
+        for (int i = 0; i < 4; i++)
+            d[0] |= ((int32_t)s[i] < 0 ? 0u : (s[i] >> 23) & 0xFFu) << (8 * i);
+        break;
+    case PSP_VP_I2C:
+        if (size != 4) goto bad;
+        dn = 1;
+        for (int i = 0; i < 4; i++) d[0] |= ((s[i] >> 24) & 0xFFu) << (8 * i);
+        break;
+    case PSP_VP_I2US:
+        if (size != 2 && size != 4) goto bad;
+        dn = size / 2;
+        for (int i = 0; i < size; i++)
+            d[i / 2] |= ((int32_t)s[i] < 0 ? 0u : (s[i] >> 15) & 0xFFFFu) << (16 * (i & 1));
+        break;
+    case PSP_VP_I2S:
+        if (size != 2 && size != 4) goto bad;
+        dn = size / 2;
+        for (int i = 0; i < size; i++) d[i / 2] |= ((s[i] >> 16) & 0xFFFFu) << (16 * (i & 1));
+        break;
+    case PSP_VP_UC2I:
+        if (size != 1) goto bad;
+        dn = 4;
+        for (int i = 0; i < 4; i++) d[i] = (((s[0] >> (8 * i)) & 0xFFu) * 0x01010101u) >> 1;
+        break;
+    case PSP_VP_C2I:
+        if (size != 1) goto bad;
+        dn = 4;
+        for (int i = 0; i < 4; i++) d[i] = ((s[0] >> (8 * i)) & 0xFFu) << 24;
+        break;
+    case PSP_VP_US2I:
+        if (size != 1 && size != 2) goto bad;
+        dn = size * 2;
+        for (int i = 0; i < dn; i++) d[i] = ((s[i / 2] >> (16 * (i & 1))) & 0xFFFFu) << 15;
+        break;
+    case PSP_VP_S2I:
+        if (size != 1 && size != 2) goto bad;
+        dn = size * 2;
+        for (int i = 0; i < dn; i++) d[i] = ((s[i / 2] >> (16 * (i & 1))) & 0xFFFFu) << 16;
+        break;
+    default:
+        goto bad;
+    }
+    vfpu_write_bits(vd, dn, d);
+    vfpu_end();
+    return;
+bad:
+    vfpu_end();
+    vfpu_trap("vpack width");
+}

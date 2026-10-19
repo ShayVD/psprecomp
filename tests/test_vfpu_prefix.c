@@ -147,7 +147,7 @@ int main(void) {
         set4(C000, 5.0f, -7.0f, 2.0f, 3.0f);
         set4(C020, 9, 9, 9, 9);
         psp_vfpu_set_prefix(PSP_VPFX_D, 0x0800u | 0x0055u);  /* sat 0:1 on 0..3, mask W */
-        psp_vunary(PSP_VU_F2IZ, C020, C000, 4);
+        psp_vf2i(1, C020, C000, 0, 4);
         psp_vfpu_regs(C020, 4, r);
         CHECK(psp_f32_to_bits(psp_cpu.v[r[0]]) == 5u &&
               psp_f32_to_bits(psp_cpu.v[r[1]]) == (uint32_t)-7 &&

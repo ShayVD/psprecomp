@@ -126,6 +126,9 @@ static void emit_static_call(ectx *c, uint32_t target) {
 
 /* ---- one non-control-flow instruction ------------------------------------ */
 
+_Static_assert(A_VF2IZ == A_VF2IN + 1 && A_VF2IU == A_VF2IN + 2 && A_VF2ID == A_VF2IN + 3,
+               "psp_vf2i's rounding mode is the op's offset from A_VF2IN");
+
 /* Nothing else maintains psp_cpu.pc, so a VFPU call stores its own address
  * first: a trap inside it (see vfpu_trap) then names this instruction. The
  * store sits next to each computing psp_v* call in emit_simple, and the table
@@ -427,7 +430,7 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
     case A_VMOV: case A_VABS: case A_VNEG: case A_VZERO: case A_VONE:
     case A_VRCP: case A_VRSQ: case A_VSQRT: case A_VSIN: case A_VCOS:
     case A_VEXP2: case A_VLOG2: case A_VSAT0: case A_VSAT1:
-    case A_VNRCP: case A_VNSIN: case A_VASIN: case A_VF2IZ: case A_VI2F: {
+    case A_VNRCP: case A_VNSIN: case A_VASIN: {
         static const struct { a_op op; const char *sel; } U[] = {
             { A_VMOV, "PSP_VU_MOV" },   { A_VABS, "PSP_VU_ABS" },
             { A_VNEG, "PSP_VU_NEG" },   { A_VZERO,"PSP_VU_ZERO" },
@@ -437,8 +440,7 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
             { A_VEXP2,"PSP_VU_EXP2" },  { A_VLOG2,"PSP_VU_LOG2" },
             { A_VSAT0,"PSP_VU_SAT0" },  { A_VSAT1,"PSP_VU_SAT1" },
             { A_VNRCP,"PSP_VU_NRCP" },  { A_VNSIN,"PSP_VU_NSIN" },
-            { A_VASIN,"PSP_VU_ASIN" },  { A_VF2IZ,"PSP_VU_F2IZ" },
-            { A_VI2F, "PSP_VU_I2F" },
+            { A_VASIN,"PSP_VU_ASIN" },
         };
         for (size_t k = 0; k < sizeof U / sizeof U[0]; k++) {
             if (U[k].op != in->op) continue;
@@ -447,6 +449,32 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
                     ind, U[k].sel, in->vd, in->vs, in->vsize);
             return;
         }
+        break;
+    }
+
+    /* Conversions with a scale exponent (bits 20..16). The four f2i forms
+     * are consecutive in a_op and map to rounding modes 0..3 in order. */
+    case A_VF2IN: case A_VF2IZ: case A_VF2IU: case A_VF2ID:
+        emit_vcall_pc(f, ind, in);
+        fprintf(f, "%spsp_vf2i(%d, %u, %u, %u, %u);\n", ind, (int)(in->op - A_VF2IN),
+                in->vd, in->vs, in->vimm5, in->vsize); return;
+    case A_VI2F:
+        emit_vcall_pc(f, ind, in);
+        fprintf(f, "%spsp_vi2f(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vimm5, in->vsize); return;
+    case A_VI2UC: case A_VI2C: case A_VI2US: case A_VI2S:
+    case A_VUC2I: case A_VC2I: case A_VUS2I: case A_VS2I: {
+        static const struct { a_op op; const char *sel; } P[] = {
+            { A_VI2UC, "PSP_VP_I2UC" }, { A_VI2C, "PSP_VP_I2C" },
+            { A_VI2US, "PSP_VP_I2US" }, { A_VI2S, "PSP_VP_I2S" },
+            { A_VUC2I, "PSP_VP_UC2I" }, { A_VC2I, "PSP_VP_C2I" },
+            { A_VUS2I, "PSP_VP_US2I" }, { A_VS2I, "PSP_VP_S2I" },
+        };
+        for (size_t k = 0; k < sizeof P / sizeof P[0]; k++)
+            if (P[k].op == in->op) {
+                emit_vcall_pc(f, ind, in);
+                fprintf(f, "%spsp_vpack(%s, %u, %u, %u);\n", ind, P[k].sel, in->vd, in->vs, in->vsize);
+                return;
+            }
         break;
     }
 

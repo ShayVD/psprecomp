@@ -106,6 +106,26 @@ int main(void) {
     expect(0x6F028180u, "psp_vsge(0, 1, 2, 4);");
     expect(0x6F828180u, "psp_vslt(0, 1, 2, 4);");
 
+    /* Conversions carry their scale (bits 20..16) and the four f2i forms differ
+     * only in the rounding mode; the packing family goes through psp_vpack
+     * with the source width. pspas words, except the vc2i/vus2i/vi2c/vi2us
+     * ones, which are derived from decode.c's VFPU7 sub-op numbers. */
+    expect(0xD2038180u, "psp_vf2i(0, 0, 1, 3, 4);");    /* vf2in.q C000, C010, 3 */
+    expect(0xD2208180u, "psp_vf2i(1, 0, 1, 0, 4);");    /* vf2iz.q */
+    expect(0xD2410100u, "psp_vf2i(2, 0, 1, 1, 1);");    /* vf2iu.s S000, S010, 1 */
+    expect(0xD2620100u, "psp_vf2i(3, 0, 1, 2, 1);");    /* vf2id.s, 2 */
+    expect(0xD2908180u, "psp_vi2f(0, 1, 16, 4);");      /* vi2f.q, 16 */
+    expect(0xD03C8180u, "psp_vpack(PSP_VP_I2UC, 0, 1, 4);");
+    expect(0xD0380100u, "psp_vpack(PSP_VP_UC2I, 0, 1, 1);");
+    expect(0xD03B0100u, "psp_vpack(PSP_VP_S2I, 0, 1, 1);");
+    expect(0xD03F0180u, "psp_vpack(PSP_VP_I2S, 0, 1, 2);");
+    expect(0xD03D8180u, "psp_vpack(PSP_VP_I2C, 0, 1, 4);");
+    expect(0xD03E0180u, "psp_vpack(PSP_VP_I2US, 0, 1, 2);");
+    expect(0xD0390100u, "psp_vpack(PSP_VP_C2I, 0, 1, 1);");
+    expect(0xD03A0100u, "psp_vpack(PSP_VP_US2I, 0, 1, 1);");
+    reject(0xD2208180u, "psp_vunary");                  /* no longer the scale-less unary path */
+    reject(0xD2908180u, "psp_vunary");
+
     /* Pipeline control. Only the canonical vsync immediate is a no-op: the
      * decoder turns every other 0xFFFFxxxx into vsync, and a data word
      * reached as code must stay loud. */
@@ -157,6 +177,19 @@ int main(void) {
             { 0xF2828180u, A_VQMUL, "psp_vqmul("  },
             { 0x6F028180u, A_VSGE,  "psp_vsge("   },
             { 0x6F828180u, A_VSLT,  "psp_vslt("   },
+            { 0xD2038180u, A_VF2IN, "psp_vf2i("   },
+            { 0xD2208180u, A_VF2IZ, "psp_vf2i("   },
+            { 0xD2410100u, A_VF2IU, "psp_vf2i("   },
+            { 0xD2620100u, A_VF2ID, "psp_vf2i("   },
+            { 0xD2908180u, A_VI2F,  "psp_vi2f("   },
+            { 0xD03C8180u, A_VI2UC, "psp_vpack("  },
+            { 0xD03D8180u, A_VI2C,  "psp_vpack("  },
+            { 0xD03E0180u, A_VI2US, "psp_vpack("  },
+            { 0xD03F0180u, A_VI2S,  "psp_vpack("  },
+            { 0xD0380100u, A_VUC2I, "psp_vpack("  },
+            { 0xD0390100u, A_VC2I,  "psp_vpack("  },
+            { 0xD03A0100u, A_VUS2I, "psp_vpack("  },
+            { 0xD03B0100u, A_VS2I,  "psp_vpack("  },
         };
         for (size_t i = 0; i < sizeof T / sizeof T[0]; i++) {
             a_insn d;

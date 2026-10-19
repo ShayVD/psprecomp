@@ -345,6 +345,247 @@ static void test_cmp_signed_zero(void) {
     CHECK(o[0] == 0 && o[1] == 0 && o[2] == 0 && o[3] == 0, "vslt +-0: %g %g %g %g", o[0], o[1], o[2], o[3]);
 }
 
+static void set_bits(uint32_t vreg, int n, const uint32_t *b) {
+    int r[4];
+    psp_vfpu_regs(vreg, n, r);
+    for (int i = 0; i < n; i++) psp_cpu.v[r[i]] = psp_bits_to_f32(b[i]);
+}
+static void get_bits(uint32_t vreg, int n, uint32_t *b) {
+    int r[4];
+    psp_vfpu_regs(vreg, n, r);
+    for (int i = 0; i < n; i++) b[i] = psp_f32_to_bits(psp_cpu.v[r[i]]);
+}
+
+/* psp_cvt_w is shared with the FPU: all four rounding modes (MIPS FCR31
+ * encoding), ties, signs, and the saturating edges. */
+static void test_cvt_w(void) {
+    static const double  x[] = { -2.5, -1.5, -0.5, -0.25, 0.25, 0.5, 1.5, 2.5, 2.75, -2.75 };
+    static const int32_t n[] = { -2,   -2,    0,    0,     0,    0,   2,   2,   3,    -3 };   /* nearest-even */
+    static const int32_t z[] = { -2,   -1,    0,    0,     0,    0,   1,   2,   2,    -2 };   /* toward zero */
+    static const int32_t u[] = { -2,   -1,    0,    0,     1,    1,   2,   3,   3,    -2 };   /* toward +inf */
+    static const int32_t d[] = { -3,   -2,   -1,   -1,     0,    0,   1,   2,   2,    -3 };   /* toward -inf */
+    for (size_t i = 0; i < sizeof x / sizeof x[0]; i++) {
+        CHECK(psp_cvt_w(x[i], 0) == n[i], "cvt_w nearest %g -> %d", x[i], (int)psp_cvt_w(x[i], 0));
+        CHECK(psp_cvt_w(x[i], 1) == z[i], "cvt_w trunc %g -> %d", x[i], (int)psp_cvt_w(x[i], 1));
+        CHECK(psp_cvt_w(x[i], 2) == u[i], "cvt_w ceil %g -> %d", x[i], (int)psp_cvt_w(x[i], 2));
+        CHECK(psp_cvt_w(x[i], 3) == d[i], "cvt_w floor %g -> %d", x[i], (int)psp_cvt_w(x[i], 3));
+    }
+    for (int rm = 0; rm < 4; rm++) {
+        CHECK(psp_cvt_w(NAN, rm) == INT32_MAX, "cvt_w NaN rm %d", rm);
+        CHECK(psp_cvt_w(INFINITY, rm) == INT32_MAX, "cvt_w +inf rm %d", rm);
+        CHECK(psp_cvt_w(-INFINITY, rm) == INT32_MIN, "cvt_w -inf rm %d", rm);
+        CHECK(psp_cvt_w(3e9, rm) == INT32_MAX && psp_cvt_w(-3e9, rm) == INT32_MIN, "cvt_w range rm %d", rm);
+        CHECK(psp_cvt_w(2147483647.0, rm) == INT32_MAX && psp_cvt_w(-2147483648.0, rm) == INT32_MIN,
+              "cvt_w exact limits rm %d", rm);
+    }
+    CHECK(psp_cvt_w(2147483646.5, 0) == 2147483646, "cvt_w tie near the top rounds to even");
+    CHECK(psp_cvt_w(-2147483648.5, 0) == INT32_MIN && psp_cvt_w(-2147483648.5, 2) == INT32_MIN, "cvt_w below min");
+    CHECK(psp_cvt_w(1.0, 5) == 1 && psp_cvt_w(1.5, 4) == 2, "cvt_w uses only the low two mode bits");
+}
+
+static void test_conversions(void) {
+    uint32_t o[4];
+    const float f[4] = { 1.3f, -1.3f, 2.5f, -2.5f };
+    set4(0x01u, 4, f);
+    psp_vf2i(0, 0x00u, 0x01u, 0, 4);             /* vf2in: nearest-even */
+    get_bits(0x00u, 4, o);
+    CHECK(o[0] == 1 && (int32_t)o[1] == -1 && o[2] == 2 && (int32_t)o[3] == -2, "vf2in");
+    psp_vf2i(1, 0x00u, 0x01u, 3, 4);             /* vf2iz, scale 3: trunc(x * 8) */
+    get_bits(0x00u, 4, o);
+    CHECK(o[0] == 10 && (int32_t)o[1] == -10 && o[2] == 20 && (int32_t)o[3] == -20, "vf2iz scale 3");
+    psp_vf2i(2, 0x00u, 0x01u, 0, 2);             /* vf2iu: up */
+    get_bits(0x00u, 2, o);
+    CHECK(o[0] == 2 && (int32_t)o[1] == -1, "vf2iu");
+    psp_vf2i(3, 0x00u, 0x01u, 0, 2);             /* vf2id: down */
+    get_bits(0x00u, 2, o);
+    CHECK(o[0] == 1 && (int32_t)o[1] == -2, "vf2id");
+    psp_vf2i(0, 0x00u, 0x01u, 1, 4);             /* scale 1: 2.6 -> 3, 5.0 -> 5 */
+    get_bits(0x00u, 4, o);
+    CHECK(o[0] == 3 && (int32_t)o[1] == -3 && o[2] == 5 && (int32_t)o[3] == -5, "vf2in scale 1: %d %d %d %d",
+          (int)o[0], (int)o[1], (int)o[2], (int)o[3]);
+    const float big[4] = { 3e9f, -3e9f, NAN, INFINITY };
+    set4(0x01u, 4, big);
+    psp_vf2i(1, 0x00u, 0x01u, 0, 4);
+    get_bits(0x00u, 4, o);
+    CHECK(o[0] == 0x7FFFFFFFu && o[1] == 0x80000000u && o[2] == 0x7FFFFFFFu && o[3] == 0x7FFFFFFFu,
+          "saturation: %08X %08X %08X %08X", o[0], o[1], o[2], o[3]);
+    const float sat[2] = { 1.0e9f, -1.0e9f };    /* in range unscaled, out of range at scale 2 */
+    set4(0x01u, 2, sat);
+    psp_vf2i(1, 0x00u, 0x01u, 2, 2);
+    get_bits(0x00u, 2, o);
+    CHECK(o[0] == 0x7FFFFFFFu && o[1] == 0x80000000u, "scaled saturation: %08X %08X", o[0], o[1]);
+
+    const uint32_t ints[2] = { 0x00010000u, 0xFFFF0000u };
+    set_bits(0x01u, 2, ints);
+    psp_vi2f(0x00u, 0x01u, 16, 2);               /* vi2f scale 16 */
+    float g[2];
+    get(0x00u, 2, g);
+    CHECK(g[0] == 1.0f && g[1] == -1.0f, "vi2f scale 16: %g %g", g[0], g[1]);
+    psp_vi2f(0x00u, 0x01u, 0, 2);
+    get(0x00u, 2, g);
+    CHECK(g[0] == 65536.0f && g[1] == -65536.0f, "vi2f scale 0: %g %g", g[0], g[1]);
+    const uint32_t imin = 0x80000000u;
+    set_bits(0x01u, 1, &imin);
+    psp_vi2f(0x00u, 0x01u, 31, 1);
+    get(0x00u, 1, g);
+    CHECK(g[0] == -1.0f, "vi2f of INT_MIN at scale 31: %g", g[0]);
+
+    /* Packing. Lane 2 of the first source is negative with bits 23..30 set, so
+     * the unsigned narrowings only give 0 for it through the negative clamp. */
+    const uint32_t q[4] = { 0x7F800000u, 0x00800000u, 0xFF800000u, 0x3FFFFFFFu };
+    set_bits(0x01u, 4, q);
+    psp_vpack(PSP_VP_I2UC, 0x00u, 0x01u, 4);
+    get_bits(0x00u, 1, o);
+    CHECK(o[0] == 0x7F0001FFu, "vi2uc: 0x%08X", o[0]);
+    psp_vpack(PSP_VP_I2C, 0x00u, 0x01u, 4);
+    get_bits(0x00u, 1, o);
+    CHECK(o[0] == 0x3FFF007Fu, "vi2c: 0x%08X", o[0]);
+
+    const uint32_t packed = 0x80FF0001u;
+    set_bits(0x01u, 1, &packed);
+    psp_vpack(PSP_VP_UC2I, 0x00u, 0x01u, 1);
+    get_bits(0x00u, 4, o);
+    CHECK(o[0] == 0x00808080u && o[1] == 0 && o[2] == 0x7FFFFFFFu && o[3] == 0x40404040u,
+          "vuc2i: %08X %08X %08X %08X", o[0], o[1], o[2], o[3]);
+    psp_vpack(PSP_VP_C2I, 0x00u, 0x01u, 1);
+    get_bits(0x00u, 4, o);
+    CHECK(o[0] == 0x01000000u && o[1] == 0 && o[2] == 0xFF000000u && o[3] == 0x80000000u,
+          "vc2i: %08X %08X %08X %08X", o[0], o[1], o[2], o[3]);
+
+    const uint32_t halves = 0x8000FFFFu;
+    set_bits(0x01u, 1, &halves);
+    psp_vpack(PSP_VP_S2I, 0x00u, 0x01u, 1);
+    get_bits(0x00u, 2, o);
+    CHECK(o[0] == 0xFFFF0000u && o[1] == 0x80000000u, "vs2i: %08X %08X", o[0], o[1]);
+    psp_vpack(PSP_VP_US2I, 0x00u, 0x01u, 1);
+    get_bits(0x00u, 2, o);
+    CHECK(o[0] == 0x7FFF8000u && o[1] == 0x40000000u, "vus2i: %08X %08X", o[0], o[1]);
+
+    /* The pair forms widen to a quad (the game's vs2i has two source lanes). */
+    const uint32_t hp[2] = { 0x00018002u, 0x7FFF0004u };
+    set_bits(0x01u, 2, hp);
+    psp_vpack(PSP_VP_S2I, 0x00u, 0x01u, 2);
+    get_bits(0x00u, 4, o);
+    CHECK(o[0] == 0x80020000u && o[1] == 0x00010000u && o[2] == 0x00040000u && o[3] == 0x7FFF0000u,
+          "vs2i.p: %08X %08X %08X %08X", o[0], o[1], o[2], o[3]);
+    psp_vpack(PSP_VP_US2I, 0x00u, 0x01u, 2);
+    get_bits(0x00u, 4, o);
+    CHECK(o[0] == 0x40010000u && o[1] == 0x00008000u && o[2] == 0x00020000u && o[3] == 0x3FFF8000u,
+          "vus2i.p: %08X %08X %08X %08X", o[0], o[1], o[2], o[3]);
+
+    const uint32_t two[2] = { 0x12345678u, 0xFEDCBA98u };
+    set_bits(0x01u, 2, two);
+    psp_vpack(PSP_VP_I2S, 0x00u, 0x01u, 2);
+    get_bits(0x00u, 1, o);
+    CHECK(o[0] == 0xFEDC1234u, "vi2s.p: 0x%08X", o[0]);
+    psp_vpack(PSP_VP_I2US, 0x00u, 0x01u, 2);
+    get_bits(0x00u, 1, o);
+    CHECK(o[0] == 0x00002468u, "vi2us.p (negative lane clamps to 0): 0x%08X", o[0]);
+    const uint32_t four[4] = { 0x12345678u, 0xFEDCBA98u, 0x7FFFFFFFu, 0x00010000u };
+    set_bits(0x01u, 4, four);
+    psp_vpack(PSP_VP_I2S, 0x00u, 0x01u, 4);
+    get_bits(0x00u, 2, o);
+    CHECK(o[0] == 0xFEDC1234u && o[1] == 0x00017FFFu, "vi2s.q: %08X %08X", o[0], o[1]);
+    psp_vpack(PSP_VP_I2US, 0x00u, 0x01u, 4);
+    get_bits(0x00u, 2, o);
+    CHECK(o[0] == 0x00002468u && o[1] == 0x0002FFFFu, "vi2us.q: %08X %08X", o[0], o[1]);
+}
+
+/* Prefix policy for the conversion and packing ops. The game has none of them
+ * under a vpfxs/vpfxt (counted in the generated code), so: vf2i* applies
+ * vpfxs element-wise (UNVERIFIED); vi2f and the packing ops trap on vpfxs,
+ * since neg/abs/constants on integer bits are unverified; none has a vt
+ * operand, so a pending vpfxt traps. A vpfxd masks the destination lanes (an
+ * integer result is never saturated). */
+static void test_conversion_prefixes(void) {
+    uint32_t o[4];
+    float g[4];
+    psp_vfpu_reset();
+    psp_vfpu_set_trap_handler(count_trap);
+
+    const float f[4] = { 1.0f, 2.0f, 3.0f, 4.0f };
+    set4(0x01u, 4, f);
+    psp_vfpu_set_prefix(PSP_VPFX_S, 0x1B);                 /* [W, Z, Y, X] */
+    psp_vf2i(1, 0x00u, 0x01u, 0, 4);
+    get_bits(0x00u, 4, o);
+    CHECK(o[0] == 4 && o[1] == 3 && o[2] == 2 && o[3] == 1 && !psp_vfpu_prefix_pending(),
+          "vf2iz with vpfxs: %u %u %u %u", o[0], o[1], o[2], o[3]);
+
+    const uint32_t keep[4] = { 77, 77, 77, 77 };
+    const uint32_t ints[4] = { 1, 2, 3, 4 };
+    g_traps = 0;
+    set_bits(0x00u, 4, keep); set_bits(0x01u, 4, ints);
+    psp_vfpu_set_prefix(PSP_VPFX_T, 0x1B);
+    psp_vf2i(1, 0x00u, 0x01u, 0, 4);
+    get_bits(0x00u, 4, o);
+    CHECK(g_traps == 1 && o[0] == 77 && !psp_vfpu_prefix_pending(),
+          "vf2i with vpfxt traps and writes nothing (%d)", g_traps);
+
+    g_traps = 0;
+    {
+        const float nine[4] = { 9, 9, 9, 9 };
+        set4(0x00u, 4, nine);
+    }
+    psp_vfpu_set_prefix(PSP_VPFX_S, 0x1B);
+    psp_vi2f(0x00u, 0x01u, 0, 4);
+    get(0x00u, 4, g);
+    CHECK(g_traps == 1 && g_trap_what && !strcmp(g_trap_what, "vi2f with vpfxs/vpfxt") && g[0] == 9 &&
+          !psp_vfpu_prefix_pending(), "vi2f with vpfxs traps (%d)", g_traps);
+    g_traps = 0;
+    psp_vfpu_set_prefix(PSP_VPFX_T, 0x1B);
+    psp_vi2f(0x00u, 0x01u, 0, 4);
+    CHECK(g_traps == 1, "vi2f with vpfxt traps (%d)", g_traps);
+
+    /* vpfxd on vi2f is an ordinary float write: saturation applies. */
+    g_traps = 0;
+    {
+        const uint32_t pm[2] = { 5u, (uint32_t)-5 };
+        set_bits(0x01u, 2, pm);
+    }
+    psp_vfpu_set_prefix(PSP_VPFX_D, 0x0001u | 0x0004u);    /* sat 0:1 on lanes 0 and 1 */
+    psp_vi2f(0x00u, 0x01u, 0, 2);
+    get(0x00u, 2, g);
+    CHECK(g_traps == 0 && g[0] == 1.0f && g[1] == 0.0f, "vi2f under vpfxd saturates: %g %g", g[0], g[1]);
+
+    for (int w = 0; w < 2; w++) {
+        const int which = w ? PSP_VPFX_T : PSP_VPFX_S;
+        const uint32_t src[4] = { 0x7F800000u, 0, 0, 0 };
+        g_traps = 0;
+        set_bits(0x00u, 4, keep);
+        set_bits(0x01u, 4, src);
+        psp_vfpu_set_prefix(which, 0x1B);
+        psp_vpack(PSP_VP_I2UC, 0x00u, 0x01u, 4);
+        get_bits(0x00u, 1, o);
+        CHECK(g_traps == 1 && g_trap_what && !strcmp(g_trap_what, "vpack with vpfxs/vpfxt") && o[0] == 77 &&
+              !psp_vfpu_prefix_pending(), "vpack with prefix %d traps and writes nothing (%d)", which, g_traps);
+    }
+
+    /* vpfxd masks packed lanes: vuc2i writes a quad, lane 1 masked. */
+    g_traps = 0;
+    {
+        const uint32_t all = 0xFFFFFFFFu;
+        set_bits(0x00u, 4, keep);
+        set_bits(0x01u, 1, &all);
+    }
+    psp_vfpu_set_prefix(PSP_VPFX_D, 1u << 9);
+    psp_vpack(PSP_VP_UC2I, 0x00u, 0x01u, 1);
+    get_bits(0x00u, 4, o);
+    CHECK(g_traps == 0 && o[0] == 0x7FFFFFFFu && o[1] == 77 && o[2] == 0x7FFFFFFFu && o[3] == 0x7FFFFFFFu,
+          "vuc2i under vpfxd mask: %08X %08X %08X %08X", o[0], o[1], o[2], o[3]);
+
+    /* A width the op does not have traps rather than reading garbage. */
+    g_traps = 0;
+    set_bits(0x00u, 4, keep);
+    psp_vpack(PSP_VP_I2UC, 0x00u, 0x01u, 2);
+    psp_vpack(PSP_VP_UC2I, 0x00u, 0x01u, 2);
+    psp_vpack(99, 0x00u, 0x01u, 1);
+    get_bits(0x00u, 4, o);
+    CHECK(g_traps == 3 && o[0] == 77, "bad vpack widths trap (%d)", g_traps);
+
+    psp_vfpu_set_trap_handler(NULL);
+    psp_vfpu_reset();
+}
+
 int main(void) {
     psp_vfpu_reset();
     test_moves();
@@ -355,6 +596,9 @@ int main(void) {
     test_sincos_edges();
     test_rot_lanes();
     test_cmp_signed_zero();
+    test_cvt_w();
+    test_conversions();
+    test_conversion_prefixes();
     printf("%s\n", failures ? "test_vfpu_ops: FAILED" : "test_vfpu_ops: ok");
     return failures ? 1 : 0;
 }
