@@ -129,9 +129,33 @@ static void emit_static_call(ectx *c, uint32_t target) {
 /* `ind` is the indentation, so a delay slot emitted inside an `if` body lines
  * up. Returns nothing: unhandled opcodes emit a trap rather than nothing, so
  * a gap is loud at run time instead of silently doing the wrong thing. */
+/* The VFPU ops emitted as runtime calls that compute (and so may trap, or
+ * may in a later revision). Loads, stores and the prefix setters are not. */
+static int vfpu_call_op(a_op op) {
+    switch (op) {
+    case A_VADD: case A_VSUB: case A_VMUL: case A_VDIV: case A_VMIN: case A_VMAX:
+    case A_VDOT: case A_VSCL: case A_VCMP:
+    case A_VMOV: case A_VABS: case A_VNEG: case A_VZERO: case A_VONE:
+    case A_VRCP: case A_VRSQ: case A_VSQRT: case A_VSIN: case A_VCOS:
+    case A_VEXP2: case A_VLOG2: case A_VSAT0: case A_VSAT1:
+    case A_VNRCP: case A_VNSIN: case A_VASIN: case A_VF2IZ: case A_VI2F:
+    case A_VIDT: case A_VCST: case A_VIIM: case A_VFIM:
+    case A_VMMUL: case A_VTFM2: case A_VTFM3: case A_VTFM4: case A_VMSCL:
+    case A_VMIDT: case A_VMZERO: case A_VMONE: case A_VMMOV:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
     FILE *f = c->out;
     const char *rd = RN[in->rd], *rs = RN[in->rs], *rt = RN[in->rt];
+
+    /* Nothing else maintains psp_cpu.pc, so a VFPU op stores its own address
+     * before the call: a trap inside it then names this instruction. */
+    if (vfpu_call_op(in->op))
+        fprintf(f, "%spsp_cpu.pc = 0x%08Xu;\n", ind, in->addr);
 
     /* Writes to $zero are discarded by the hardware. Emitting them would
      * clobber a register the rest of the code assumes is always zero. */

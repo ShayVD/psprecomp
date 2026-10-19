@@ -238,6 +238,10 @@ void psp_vdot(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
 
 /* Scale: every lane of vs multiplied by the scalar in vt. */
 void psp_vscl(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
+    /* What a vpfxt does to vscl's scalar operand lane by lane is not
+     * verified, and the game never prefixes it: trap until P2's oracle says.
+     * The S and D prefixes apply as for any element-wise op. */
+    if (g_prefix_set[PSP_VPFX_T]) { vfpu_end(); vfpu_trap("vscl with vpfxt"); return; }
     const int n = width(size);
     float s[4], t[4], d[4];
     vfpu_read(PSP_VPFX_S, vs, n, s);
@@ -341,15 +345,28 @@ void psp_vmidt(uint32_t vd, int size) {
 
 /* vidt -- an identity *vector*: all zeroes but for a single 1.0.
  *
- * Which element gets the 1 is encoded in the destination register number
- * rather than given as an operand, which is how one instruction builds any
- * basis vector. Bits 6-7 of vd select the position.
+ * Which element gets the 1 follows from the destination register itself:
+ * it is the lane whose number equals the register's own index within its
+ * matrix -- the column number for C<m><c><r>, the row number for a
+ * transposed R<m><r><c> -- held in vd bits 1..0. So vidt.q on C000, C010,
+ * C020, C030 builds an identity column by column (the game's matrix builders
+ * do exactly this), and C030 alone is (0, 0, 0, 1). A pair takes bit 0 only.
+ * An earlier version used bits 6..5, which are always 0 for a quad and put
+ * every 1 in lane 0.
+ *
+ * Single and triple forms are not verified (the game uses neither): they
+ * trap rather than guess.
  *
  * This is matrix-setup code. Trapping it to a no-op leaves whatever was in the
  * register, so downstream geometry is built on a basis that is not a basis. */
 void psp_vidt(uint32_t vd, int size) {
     const int n = width(size);
-    const int one = (int)((vd >> 6) & 3);
+    if (n != 2 && n != 4) {
+        vfpu_end();
+        vfpu_trap(n == 1 ? "vidt.s" : "vidt.t");
+        return;
+    }
+    const int one = (int)(vd & (uint32_t)(n - 1));
     float d[4];
     for (int i = 0; i < n; i++) d[i] = (i == one) ? 1.0f : 0.0f;
     vfpu_write(vd, n, d);
@@ -489,17 +506,20 @@ void psp_vmmul(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
 }
 
 /* Compare, writing one condition bit per lane plus the any/all summary bits
- * that vcmov and the bvt/bvf branches read: bits 0..3 the lanes (those past
- * the width are cleared), bit 4 any lane, bit 5 all lanes. The condition is
- * the low nibble; 8..15 test vs alone. Both operands go through their
- * prefixes either way, and vcmp consumes all three. */
+ * that vcmov and the bvt/bvf branches read: bits 0..n-1 the lanes, bit 4 any
+ * lane, bit 5 all lanes. Lane bits n..3 keep their previous value; that is
+ * our reading of the documentation, not verified on hardware -- P2's oracle
+ * verifies it. The condition is the low nibble; 8..15 test vs alone. Both
+ * operands go through their prefixes either way, and vcmp consumes all
+ * three. */
 void psp_vcmp(uint32_t cond, uint32_t vs, uint32_t vt, int size) {
     const int n = width(size);
     float s[4], t[4];
     vfpu_read(PSP_VPFX_S, vs, n, s);
     vfpu_read(PSP_VPFX_T, vt, n, t);
 
-    uint32_t cc = 0;
+    const uint32_t touched = ((1u << n) - 1u) | (1u << 4) | (1u << 5);
+    uint32_t cc = psp_cpu.vfpu_cc & ~touched;
     int all = 1, any = 0;
     for (int i = 0; i < n; i++) {
         const float a = s[i], b = t[i];
@@ -531,11 +551,9 @@ void psp_vcmp(uint32_t cond, uint32_t vs, uint32_t vt, int size) {
 }
 
 /* viim / vfim -- write a single lane from an immediate encoded in the
- * instruction. The write is raw (there is no source operand to rewrite), but
- * the op still consumes any pending prefixes. */
+ * instruction. There is no source operand to rewrite, but the write goes
+ * through the D prefix (mask, saturate) and the op consumes all three. */
 void psp_vimm(uint32_t vd, float value) {
-    int d[4];
-    psp_vfpu_regs(vd, 1, d);
-    psp_cpu.v[d[0]] = value;
+    vfpu_write(vd, 1, &value);
     vfpu_end();
 }

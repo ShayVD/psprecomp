@@ -42,7 +42,10 @@ extern const char *const psp_reg_names[PSP_NUM_GPR];
 typedef struct {
     uint32_t r[PSP_NUM_GPR];   /* r[0] is hardwired zero; see psp_set_reg() */
     uint32_t hi, lo;
-    uint32_t pc;               /* only meaningful at dispatch boundaries */
+    uint32_t pc;               /* the last VFPU op's address: generated code
+                                  stores it before each VFPU call that computes,
+                                  so a trap can name the instruction. Nothing
+                                  else maintains it. */
 
     float    f[32];            /* COP1 — single precision only */
     uint32_t fcr31;            /* FPU control/status; bit 23 is the C flag */

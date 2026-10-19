@@ -57,6 +57,16 @@ static void reject(uint32_t word, const char *needle) {
     }
 }
 
+/* `first` appears, and `then` appears after it. */
+static void expect_order(uint32_t word, const char *first, const char *then) {
+    const char *src = emit_one(word);
+    const char *a = strstr(src, first);
+    if (!a || !strstr(a, then)) {
+        printf("FAIL 0x%08X: expected \"%s\" before \"%s\"\n", word, first, then);
+        failures++;
+    }
+}
+
 int main(void) {
     /* vcst takes its constant index from bits 20..16 (vimm5), not from vs.
      * pspas: vcst.s S000, VFPU_PI = 0xD0690000; the game's 2/pi is 0xD0650024. */
@@ -72,6 +82,14 @@ int main(void) {
     reject(0x49090003u, "!((psp_cpu.vfpu_cc");
     reject(0x49170003u, "!((psp_cpu.vfpu_cc");
     expect(0x49020003u, "!((psp_cpu.vfpu_cc >> 0) & 1)");   /* bvfl 0 */
+
+    /* A VFPU op that can trap stores its own address in psp_cpu.pc first, so
+     * the trap names the instruction. Loads, stores and prefixes cannot trap. */
+    expect_order(0x60008080u, "psp_cpu.pc = 0x08804000u;", "psp_vadd(0, 0, 0, 4);");
+    expect_order(0xF3838080u, "psp_cpu.pc = 0x08804000u;", "psp_vmidt(0, 4);");   /* vmidt.q M000 */
+    expect_order(0xD0690000u, "psp_cpu.pc = 0x08804000u;", "psp_vcst(0, 9, 1);");
+    reject(0xD8000000u, "psp_cpu.pc =");                     /* lv.q */
+    reject(0xDC0000E4u, "psp_cpu.pc =");                     /* vpfxs */
 
     remove("./t_emit_vfpu_funcs.c");
     remove("./t_emit_vfpu_funcs.h");

@@ -120,7 +120,8 @@ void psp_vfpu_set_trap_handler(psp_vfpu_trap_fn fn);
 
 /* Reports an instruction the VFPU cannot yet execute, by address and name:
  * through the trap handler when one is installed, otherwise printed and
- * counted. `addr` is psp_cpu.pc, which is only exact at dispatch boundaries. */
+ * counted. `addr` is psp_cpu.pc, which the generated code sets to the
+ * instruction's address before every VFPU call that computes. */
 void psp_vfpu_unimplemented(uint32_t addr, const char *what);
 uint64_t psp_vfpu_trap_count(void);
 

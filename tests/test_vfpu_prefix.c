@@ -1,6 +1,7 @@
 /* VFPU operand prefixes and vcmp conditions. Synthetic values only. */
 #include "psprecomp/vfpu.h"
 #include "psprecomp/recomp_rt.h"
+#include "../src/vfpu_internal.h"      /* vfpu_read, for the identity sweep */
 
 #include <math.h>
 #include <stdio.h>
@@ -23,7 +24,21 @@ static void get4(uint32_t vreg, float out[4]) {
 #define EQ4(o, a, b, c, d) ((o)[0] == (a) && (o)[1] == (b) && (o)[2] == (c) && (o)[3] == (d))
 
 static int traps;
-static void on_trap(uint32_t addr, const char *what) { (void)addr; (void)what; traps++; }
+static uint32_t trap_addr;
+static void on_trap(uint32_t addr, const char *what) { (void)what; trap_addr = addr; traps++; }
+
+static uint32_t bits_at(int reg) { return psp_f32_to_bits(psp_cpu.v[reg]); }
+
+/* vidt on `vd` at width `n` writes 1 in lane `one`, 0 elsewhere. */
+static int vidt_is(uint32_t vd, int n, int one) {
+    int r[4];
+    psp_vfpu_regs(vd, n, r);
+    for (int i = 0; i < n; i++) psp_cpu.v[r[i]] = 7.0f;
+    psp_vidt(vd, n);
+    for (int i = 0; i < n; i++)
+        if (psp_cpu.v[r[i]] != (i == one ? 1.0f : 0.0f)) return 0;
+    return 1;
+}
 
 #define C000 0x00u
 #define C010 0x01u
@@ -162,10 +177,14 @@ int main(void) {
     psp_vcmp(15, C000, C000, 4);                   /* NS */
     CHECK((psp_cpu.vfpu_cc & 0xF) == 0x9, "vcmp NS: cc=0x%X", psp_cpu.vfpu_cc);
 
-    /* Lanes past the width are cleared, and any/all cover only n lanes. */
-    psp_cpu.vfpu_cc = 0x3F;
+    /* A narrower vcmp updates only its own lanes and bits 4/5; the lane bits
+     * past its width keep their old value, and any/all cover its n lanes. */
+    psp_cpu.vfpu_cc = 0x0A;
     psp_vcmp(13, C000, C000, 1);                   /* NN on lane 0 alone (0.0) */
-    CHECK(psp_cpu.vfpu_cc == 0x31, "vcmp.s NN: cc=0x%X", psp_cpu.vfpu_cc);
+    CHECK(psp_cpu.vfpu_cc == 0x3B, "vcmp.s NN: cc=0x%X", psp_cpu.vfpu_cc);
+    psp_cpu.vfpu_cc = 0x3F;
+    psp_vcmp(0, C000, C000, 2);                    /* FL on lanes 0, 1 */
+    CHECK(psp_cpu.vfpu_cc == 0x0C, "vcmp.p FL: cc=0x%X", psp_cpu.vfpu_cc);
 
     /* vcmp reads vs through the S prefix: EZ on a forced 0 in every lane. */
     psp_vfpu_set_prefix(PSP_VPFX_S, 0x0F000u);
@@ -173,11 +192,20 @@ int main(void) {
     CHECK(psp_cpu.vfpu_cc == 0x3F && !psp_vfpu_prefix_pending(), "vcmp with prefix: cc=0x%X",
           psp_cpu.vfpu_cc);
 
-    /* An op without prefix support traps through the handler when one is pending. */
+    /* A T-only prefix is consumed by vcmp, even for a condition that reads
+     * vs alone. */
+    psp_vfpu_set_prefix(PSP_VPFX_T, 0x0F000u);
+    psp_vcmp(8, C000, C000, 4);
+    CHECK(!psp_vfpu_prefix_pending(), "vcmp EZ consumes a T-only prefix");
+
+    /* An op without prefix support traps through the handler when one is
+     * pending, with the address the generated code stored in psp_cpu.pc. */
     psp_vfpu_set_trap_handler(on_trap);
     psp_vfpu_set_prefix(PSP_VPFX_S, 0x1B);
+    psp_cpu.pc = 0x08812340u;
     psp_vmmov(0x00u, 0x04u, 4);
     CHECK(traps == 1, "matrix op with a pending prefix traps (%d)", traps);
+    CHECK(trap_addr == 0x08812340u, "trap address 0x%08X", trap_addr);
     CHECK(!psp_vfpu_prefix_pending(), "the trap consumed the prefix");
 
     /* The handler survives a reset. */
@@ -185,7 +213,138 @@ int main(void) {
     psp_vfpu_set_prefix(PSP_VPFX_D, 0x100);
     psp_vmidt(0x00u, 4);
     CHECK(traps == 2, "the handler survives psp_vfpu_reset (%d)", traps);
+
+    /* vidt: a quad puts its 1 in the lane matching the register's column
+     * (C0c0, vd = c) or row (R0r0, vd = 0x20 | r) index, vd & 3, so
+     * vidt C000..C030 builds an identity matrix by columns and R000..R030 by
+     * rows. A pair uses vd & 1. */
+    for (uint32_t c = 0; c < 4; c++) {
+        CHECK(vidt_is(c, 4, (int)c), "vidt.q C0%u0", c);
+        CHECK(vidt_is(0x20u | c, 4, (int)c), "vidt.q R0%u0", c);
+        CHECK(vidt_is(0x0Cu | c, 4, (int)c), "vidt.q C3%u0", c);
+    }
+    CHECK(vidt_is(0x00u, 2, 0) && vidt_is(0x01u, 2, 1), "vidt.p C000 / C010");
+    CHECK(vidt_is(0x40u, 2, 0) && vidt_is(0x41u, 2, 1), "vidt.p C002 / C012");
+    CHECK(vidt_is(0x20u, 2, 0) && vidt_is(0x21u, 2, 1), "vidt.p R000 / R010");
+    /* Single and triple vidt are not verified: they trap. */
+    traps = 0;
+    psp_vidt(0x00u, 1);
+    psp_vidt(0x00u, 3);
+    CHECK(traps == 2, "vidt.s / vidt.t trap (%d)", traps);
+
+    /* vscl with a pending T prefix traps (per-lane semantics unverified), and
+     * the prefixes are consumed. */
+    traps = 0;
+    set4(C000, 1, 2, 3, 4); set4(C020, 9, 9, 9, 9);
+    psp_vfpu_set_prefix(PSP_VPFX_T, 0x20000u | 0xE4u);
+    psp_vscl(C020, C000, C010, 4);
+    get4(C020, o);
+    CHECK(traps == 1 && EQ4(o, 9, 9, 9, 9) && !psp_vfpu_prefix_pending(),
+          "vscl with a T prefix traps (%d): %g %g %g %g", traps, o[0], o[1], o[2], o[3]);
     psp_vfpu_set_trap_handler(NULL);
+
+    /* vscl through a D prefix: mask lane 1, saturate lane 2 to [0, 1]. */
+    {
+        int r[4];
+        psp_vfpu_regs(0x41u, 1, r);                 /* S012: a scalar elsewhere */
+        psp_cpu.v[r[0]] = 2.0f;
+        set4(C000, 1, 2, 3, 4); set4(C020, 9, 9, 9, 9);
+        psp_vfpu_set_prefix(PSP_VPFX_D, 0x0200u | 0x0010u);
+        psp_vscl(C020, C000, 0x41u, 4);
+        get4(C020, o);
+        CHECK(EQ4(o, 2, 9, 1, 8), "vscl through vpfxd: %g %g %g %g", o[0], o[1], o[2], o[3]);
+    }
+
+    /* vdot with T and D prefixes: t forced to [1, 1, 1, -1], result saturated
+     * to [-1, 1]. 1 + 2 + 3 - 4 = 2 -> 1. */
+    set4(C000, 1, 2, 3, 4); set4(C010, 5, 5, 5, 5); set4(C020, 9, 9, 9, 9);
+    psp_vfpu_set_prefix(PSP_VPFX_T, 0x80000u | 0x0F000u | 0x55u);
+    psp_vfpu_set_prefix(PSP_VPFX_D, 0x3u);
+    psp_vdot(C020, C000, C010, 4);
+    get4(C020, o);
+    CHECK(EQ4(o, 1, 9, 9, 9), "vdot with T and D: %g %g %g %g", o[0], o[1], o[2], o[3]);
+    set4(C020, 9, 9, 9, 9);
+    psp_vfpu_set_prefix(PSP_VPFX_T, 0x80000u | 0x0F000u | 0x55u);
+    psp_vdot(C020, C000, C010, 4);
+    get4(C020, o);
+    CHECK(o[0] == 2.0f, "vdot with T alone: %g", o[0]);
+
+    /* vidt, vcst and viim/vfim write through the D prefix. */
+    set4(C020, 9, 9, 9, 9);
+    psp_vfpu_set_prefix(PSP_VPFX_D, 0x0100u);       /* mask lane 0 */
+    psp_vidt(C020, 4);                              /* the 1 goes in lane 2 */
+    get4(C020, o);
+    CHECK(EQ4(o, 9, 0, 1, 0), "vidt through vpfxd: %g %g %g %g", o[0], o[1], o[2], o[3]);
+    set4(C020, 9, 9, 9, 9);
+    psp_vfpu_set_prefix(PSP_VPFX_D, 0x0100u | 0x00F0u);  /* mask X, saturate Z, W */
+    psp_vcst(C020, 9, 4);                           /* pi */
+    get4(C020, o);
+    CHECK(o[0] == 9.0f && o[1] > 3.14f && o[1] < 3.15f && o[2] == 1.0f && o[3] == 1.0f,
+          "vcst through vpfxd: %g %g %g %g", o[0], o[1], o[2], o[3]);
+    {
+        int r[4];
+        psp_vfpu_regs(0x00u, 1, r);
+        psp_cpu.v[r[0]] = 9.0f;
+        psp_vfpu_set_prefix(PSP_VPFX_D, 0x100u);
+        psp_vimm(0x00u, 5.0f);
+        CHECK(psp_cpu.v[r[0]] == 9.0f && !psp_vfpu_prefix_pending(), "viim, masked: %g",
+              psp_cpu.v[r[0]]);
+        psp_vfpu_set_prefix(PSP_VPFX_D, 0x3u);
+        psp_vimm(0x00u, -5.0f);
+        CHECK(psp_cpu.v[r[0]] == -1.0f, "viim, saturated: %g", psp_cpu.v[r[0]]);
+    }
+
+    /* The identity prefix reads exactly what an unprefixed read does, for
+     * every register field and width. */
+    {
+        for (int i = 0; i < 128; i++) psp_cpu.v[i] = (float)(i + 1);
+        int bad = 0;
+        for (int n = 1; n <= 4; n++)
+            for (uint32_t v = 0; v < 128; v++) {
+                float a[4], b[4];
+                vfpu_read_raw(v, n, a);
+                psp_vfpu_set_prefix(PSP_VPFX_S, 0xE4);
+                vfpu_read(PSP_VPFX_S, v, n, b);
+                vfpu_end();
+                if (memcmp(a, b, sizeof(float) * (size_t)n)) bad++;
+            }
+        CHECK(bad == 0, "identity prefix differs from a raw read in %d operands", bad);
+    }
+
+    /* A narrow op picks lanes past its width within its row or column, from
+     * an offset start, transposed or not (the wrap is unverified; this pins
+     * our reading). The pair at 0x60 is the transposed rows 2, 3 of column 0:
+     * registers 64, 96, then (wrapping) 0, 32. The single at 0x60 is row 3 of
+     * column 0, register 3; its lane pick 1 wraps to row 0, register 0. */
+    {
+        for (int i = 0; i < 128; i++) psp_cpu.v[i] = (float)i;
+        float b[4];
+        psp_vfpu_set_prefix(PSP_VPFX_S, 0x0Eu);     /* lane0 <- 2, lane1 <- 3 */
+        vfpu_read(PSP_VPFX_S, 0x60u, 2, b);
+        vfpu_end();
+        CHECK(b[0] == 0.0f && b[1] == 32.0f, "transposed pair wrap: %g %g", b[0], b[1]);
+        psp_vfpu_set_prefix(PSP_VPFX_S, 0x01u);     /* lane0 <- 1 */
+        vfpu_read(PSP_VPFX_S, 0x60u, 1, b);
+        vfpu_end();
+        CHECK(b[0] == 0.0f, "single row-3 wrap: %g", b[0]);
+        psp_vfpu_set_prefix(PSP_VPFX_S, 0x00u);     /* lane0 <- 0 */
+        vfpu_read(PSP_VPFX_S, 0x60u, 1, b);
+        vfpu_end();
+        CHECK(b[0] == 3.0f, "single row-3 pick 0: %g", b[0]);
+    }
+
+    /* No fused multiply-add: vdot.p of (1, 1+2^-12) and (-(1+2^-11), 1+2^-12).
+     * Rounded separately, the second product is 1+2^-11 and the sum is 0;
+     * fused, the sum is 2^-24. */
+    {
+        int r[4];
+        const float a = 1.0f + 0x1p-12f, c = -(1.0f + 0x1p-11f);
+        psp_vfpu_regs(0x00u, 2, r); psp_cpu.v[r[0]] = 1.0f; psp_cpu.v[r[1]] = a;
+        psp_vfpu_regs(0x01u, 2, r); psp_cpu.v[r[0]] = c;    psp_cpu.v[r[1]] = a;
+        psp_vdot(0x02u, 0x00u, 0x01u, 2);
+        psp_vfpu_regs(0x02u, 1, r);
+        CHECK(bits_at(r[0]) == 0u, "vdot.p rounds each product: %a", (double)psp_cpu.v[r[0]]);
+    }
 
     printf("%s\n", failures ? "test_vfpu_prefix: FAILED" : "test_vfpu_prefix: ok");
     return failures ? 1 : 0;
