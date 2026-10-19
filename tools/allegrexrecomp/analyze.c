@@ -558,6 +558,16 @@ typedef struct {
     uint8_t    *no_table;
 } walk_ctx;
 
+/* Was the word at index `ti` walked already by another function, and is it
+ * not an entry? Then a transfer to it from this function crosses into
+ * another function's middle, which the emitter can only do through an
+ * entry: the target is promoted between rounds. Code this function walked
+ * itself (a loop's head, a shared tail, a case block reached twice) is just
+ * a label of this function. */
+static int foreign_block(const walk_ctx *c, uint32_t ti) {
+    return (c->seen[ti] & SEEN_CODE) && !c->entry_map[ti] && c->owner[ti] != c->cur_owner;
+}
+
 static int is_known_entry(const walk_ctx *c, uint32_t addr) {
     if (!a_in_range(c->an, addr)) return 0;
     return c->entry_map[word_index(c->an, addr)] != 0;
@@ -716,7 +726,7 @@ static int trace_function(walk_ctx *c, uint32_t entry, a_func *out) {
                     for (int k = first; ok && k < first + n; k++) {
                         const uint32_t t = c->jt_targets->v[k];
                         const uint32_t ti = word_index(an, t);
-                        if ((c->seen[ti] & SEEN_CODE) && !c->entry_map[ti])
+                        if (foreign_block(c, ti))
                             ok = u32_push(c->cross, t) == 0;
                         else
                             ok = u32_push(&blocks, t) == 0;
@@ -742,7 +752,7 @@ static int trace_function(walk_ctx *c, uint32_t entry, a_func *out) {
                  * and execution also falls through past the delay slot. */
                 if (in.has_target && a_in_range(an, in.target)) {
                     uint32_t ti = word_index(an, in.target);
-                    if ((c->seen[ti] & SEEN_CODE) && !c->entry_map[ti]) {
+                    if (foreign_block(c, ti)) {
                         /* Already claimed by an earlier walk, and not an entry.
                          * Two functions therefore share this block, which is a
                          * walk-order artefact rather than a property of the
@@ -805,7 +815,7 @@ static int trace_function(walk_ctx *c, uint32_t entry, a_func *out) {
                          * The branch path above has always promoted these. The
                          * jump path did not, so a whole class of shared block
                          * stayed unreachable. */
-                        if ((c->seen[bi] & SEEN_CODE) && !c->entry_map[bi])
+                        if (foreign_block(c, bi))
                             u32_push(c->cross, in.target);
                         else
                             u32_push(&blocks, in.target);

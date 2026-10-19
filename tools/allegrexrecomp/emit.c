@@ -647,7 +647,9 @@ static void emit_function(ectx *c, const a_func *fn) {
         fprintf(f, "    switch (_entry) {\n");
         for (uint32_t a = fn->start; a < fn->end; a += 4) {
             if (!owned_by(an, a, owner) || !c->is_label[widx(an, a)]) continue;
-            if (c->is_slot[widx(an, a)]) continue;   /* only the inline copy is real */
+            /* A labelled delay slot has its own copy under L_<slot> (see
+             * emit_slot_alias), which runs the slot and carries on at a + 8:
+             * exactly what arriving there does. */
             fprintf(f, "    case 0x%08Xu: goto L_%08X;\n", a, a);
         }
         fprintf(f, "    default: break;\n");
@@ -891,7 +893,7 @@ static void emit_function(ectx *c, const a_func *fn) {
             fn->addr, fn->addr, fn->addr);
     for (uint32_t a = fn->start; a < fn->end; a += 4) {
         if (!owned_by(an, a, owner) || !c->is_label[widx(an, a)]) continue;
-        if (c->is_slot[widx(an, a)] || a == fn->addr) continue;
+        if (a == fn->addr) continue;
         fprintf(f, "void psp_at_%08X(void) { psp_body_%08X(0x%08Xu); }\n",
                 a, fn->addr, a);
         entry_push(c, a);

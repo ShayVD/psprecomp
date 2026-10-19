@@ -724,22 +724,28 @@ int main(void) {
         a_analysis_free(&an);
     }
 
-    /* A case that is the jr's own delay slot: discovery makes it an entry,
-     * so the case is a tail call, but the slot still runs inline with the
-     * jr, before the switch. */
+    /* A case that is the jr's own delay slot: it stays a block of the
+     * function. The slot runs inline with the jr, before the switch; the
+     * case goes to the slot's own copy, which runs it and carries on at
+     * 0x20; and the slot can be entered (dispatched to) like any label. */
     {
         uint32_t s4 = BASE;
         build_probe(BASE + 0x0C, BASE + 0x1C, BASE + 0x28, 1);
         setup(&an, 0x48);
         CHECK(a_discover(&an, &s4, 1) == 0, "discover (slot target)");
         CHECK(an.njtables == 1, "slot-target table kept, got %d", an.njtables);
+        CHECK(an.nfuncs == 1, "slot and idiom-inner cases stay blocks, got %d functions", an.nfuncs);
         const char *src = emit_source(&an, "t_switch_slot");
-        const char *body = strstr(src, "static void psp_body_0880400C");
+        const char *body = strstr(src, "static void psp_body_08804000");
         const char *sw = body ? strstr(body, "uint32_t _sw") : NULL;
         const char *inl = sw ? strstr(sw, "/* 0880401C") : NULL;
         const char *swi = sw ? strstr(sw, "switch (_sw) {") : NULL;
         CHECK(inl && swi && inl < swi, "slot runs inline before the switch");
-        CHECK(strstr(src, "psp_func_0880401C(); PSP_SP_CALL") != NULL, "slot case is a call to its entry");
+        CHECK(strstr(src, "case 0x0880401Cu: goto L_0880401C;") != NULL, "slot case is a goto");
+        const char *alias = strstr(src, "L_0880401C:\n");
+        const char *after = alias ? strstr(alias, "/* 08804020") : NULL;
+        CHECK(alias && after, "the slot's copy carries on at 0x20");
+        CHECK(strstr(src, "void psp_at_0880401C(void)") != NULL, "the slot can be entered");
         a_analysis_free(&an);
     }
 
@@ -811,6 +817,25 @@ int main(void) {
         const char *close = body ? strstr(body, "\n}\n") : NULL;
         const char *call = body ? strstr(body, "psp_func_08804014()") : NULL;
         CHECK(call && close && call < close, "strlen: the loop runs on into the tail");
+        a_analysis_free(&an);
+    }
+
+    /* A branch or backward `j` to code this function already walked (a
+     * loop's head) is a label, not a new function. */
+    for (int k = 0; k < 2; k++) {
+        memset(g_w, 0, sizeof g_w);
+        g_w[0x00 / 4] = ori(V0, 0, 0);
+        g_w[0x04 / 4] = addiu(A0, A0, -1);                       /* loop head */
+        g_w[0x08 / 4] = k ? beq(A0, 0, BASE + 0x08, BASE + 0x18) : bne(A0, 0, BASE + 0x08, BASE + 0x04);
+        g_w[0x0C / 4] = addiu(V0, V0, 1);
+        g_w[0x10 / 4] = k ? j_(BASE + 0x04) : JR_RA;
+        g_w[0x18 / 4] = JR_RA;
+        store();
+        uint32_t s0 = BASE;
+        setup(&an, 0x20);
+        CHECK(a_discover(&an, &s0, 1) == 0, "discover (loop %d)", k);
+        CHECK(an.nfuncs == 1 && an.owner[0x04 / 4] == BASE,
+              "%s back-edge: one function, got %d", k ? "j" : "branch", an.nfuncs);
         a_analysis_free(&an);
     }
 
