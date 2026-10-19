@@ -90,3 +90,7 @@ endforeach()
 add_executable(test_prune test_prune.c)
 target_link_libraries(test_prune PRIVATE allegrex_core)
 add_test(NAME prune COMMAND test_prune)
+
+add_executable(test_decode_vfpu test_decode_vfpu.c)
+target_link_libraries(test_decode_vfpu PRIVATE allegrex_core)
+add_test(NAME decode_vfpu COMMAND test_decode_vfpu)

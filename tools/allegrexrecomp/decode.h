@@ -94,6 +94,17 @@ typedef enum {
     /* VFPU6 (opcode 0x3C): the matrix unit. */
     A_VMMUL, A_VTFM2, A_VTFM3, A_VTFM4, A_VMSCL, A_VCRSP, A_VROT,
     A_VMMOV, A_VMIDT, A_VMZERO, A_VMONE,
+    A_VQMUL,
+    /* VFPU0 sub-op 2. */
+    A_VSBN,
+    /* VFPU7 (opcode 0x34, rs=1): random numbers, half floats, packing. */
+    A_VRNDS, A_VRNDI, A_VRNDF1, A_VRNDF2, A_VF2H, A_VH2F, A_VSBZ, A_VLGB,
+    A_VUC2I, A_VC2I, A_VUS2I, A_VS2I, A_VI2UC, A_VI2C, A_VI2US, A_VI2S,
+    /* VFPU9 (opcode 0x34, rs=2): lane sorts, butterflies, horizontal ops. */
+    A_VSRT1, A_VSRT2, A_VBFY1, A_VBFY2, A_VOCP, A_VSOCP, A_VFAD, A_VAVG,
+    A_VSRT3, A_VSRT4, A_VSGN, A_VMFVC, A_VMTVC, A_VT4444, A_VT5551, A_VT5650,
+    /* Opcode 0x3F: pipeline control, no architectural effect here. */
+    A_VNOP, A_VSYNC, A_VFLUSH,
     /* Any VFPU encoding we recognise as VFPU but do not yet name. Emitting
      * these is a hard error rather than a silent wrong answer. */
     A_VIIM,
@@ -129,6 +140,10 @@ typedef struct {
 
     uint8_t  vs, vt, vd; /* VFPU register fields (7-bit) */
     uint8_t  vsize;      /* 1=single 2=pair 3=triple 4=quad */
+    /* VFPU bits 20..16, decoded for every word: the vrot lane code, vcmov's
+     * true/false bit and condition, the conversion scale exponent, and the
+     * bv* branches' condition index (bits 20..18). */
+    uint8_t  vimm5;
 
     /* Analysis flags — what the discovery pass and the emitter need to know
      * without re-deriving it from the opcode. */

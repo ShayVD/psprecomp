@@ -233,6 +233,26 @@ static const a_opinfo OPINFO[A_OP_COUNT] = {
     [A_VTFM4]    = { "vtfm4",    F_VD_VS_VT },
     [A_VMSCL]    = { "vmscl",    F_VD_VS_VT },
     [A_VCRSP]    = { "vcrsp",    F_VD_VS_VT },
+    [A_VQMUL]  = { "vqmul",  F_VD_VS_VT }, [A_VSBN]   = { "vsbn",   F_VD_VS_VT },
+    [A_VRNDS]  = { "vrnds",  F_VD_VS },    [A_VRNDI]  = { "vrndi",  F_VD_VS },
+    [A_VRNDF1] = { "vrndf1", F_VD_VS },    [A_VRNDF2] = { "vrndf2", F_VD_VS },
+    [A_VF2H]   = { "vf2h",   F_VD_VS },    [A_VH2F]   = { "vh2f",   F_VD_VS },
+    [A_VSBZ]   = { "vsbz",   F_VD_VS },    [A_VLGB]   = { "vlgb",   F_VD_VS },
+    /* SNC's assembler spells this one "vuc2ifs"; the encoding is the same. */
+    [A_VUC2I]  = { "vuc2i",  F_VD_VS },    [A_VC2I]   = { "vc2i",   F_VD_VS },
+    [A_VUS2I]  = { "vus2i",  F_VD_VS },    [A_VS2I]   = { "vs2i",   F_VD_VS },
+    [A_VI2UC]  = { "vi2uc",  F_VD_VS },    [A_VI2C]   = { "vi2c",   F_VD_VS },
+    [A_VI2US]  = { "vi2us",  F_VD_VS },    [A_VI2S]   = { "vi2s",   F_VD_VS },
+    [A_VSRT1]  = { "vsrt1",  F_VD_VS },    [A_VSRT2]  = { "vsrt2",  F_VD_VS },
+    [A_VBFY1]  = { "vbfy1",  F_VD_VS },    [A_VBFY2]  = { "vbfy2",  F_VD_VS },
+    [A_VOCP]   = { "vocp",   F_VD_VS },    [A_VSOCP]  = { "vsocp",  F_VD_VS },
+    [A_VFAD]   = { "vfad",   F_VD_VS },    [A_VAVG]   = { "vavg",   F_VD_VS },
+    [A_VSRT3]  = { "vsrt3",  F_VD_VS },    [A_VSRT4]  = { "vsrt4",  F_VD_VS },
+    [A_VSGN]   = { "vsgn",   F_VD_VS },    [A_VMFVC]  = { "vmfvc",  F_VD_VS },
+    [A_VMTVC]  = { "vmtvc",  F_VD_VS },    [A_VT4444] = { "vt4444", F_VD_VS },
+    [A_VT5551] = { "vt5551", F_VD_VS },    [A_VT5650] = { "vt5650", F_VD_VS },
+    [A_VNOP]   = { "vnop",   F_NONE },     [A_VSYNC]  = { "vsync",  F_NONE },
+    [A_VFLUSH] = { "vflush", F_NONE },
     [A_VROT]     = { "vrot",     F_VD_VS },
     [A_VMMOV]    = { "vmmov",    F_VD_VS },
     [A_VMIDT]    = { "vmidt",    F_VD_VS },
@@ -447,10 +467,12 @@ static a_op decode_cop2(uint32_t w, uint32_t addr, a_insn *in) {
     switch (RS_F(w)) {
     case 0x00: return A_MFC1;    /* mfc2: integer move, no vector register */
     case 0x02: return A_CFC1;    /* cfc2 */
-    case 0x03: return A_MFV;
+    /* Bit 7 of the register field selects the control registers (128..143):
+     * mfvc/mtvc share mfv/mtv's sub-opcode. */
+    case 0x03: return (w & 0x80) ? A_MFVC : A_MFV;
     case 0x04: return A_MTC1;    /* mtc2 */
     case 0x06: return A_CTC1;    /* ctc2 */
-    case 0x07: return A_MTV;
+    case 0x07: return (w & 0x80) ? A_MTVC : A_MTV;
     case 0x08:
         switch (RT_F(w) & 3) {
         case 0: set_branch(in, addr, 0); return A_BVF;
@@ -479,6 +501,7 @@ int a_decode(uint32_t word, uint32_t addr, a_insn *out) {
     in.vs = (uint8_t)VS_F(word);
     in.vt = (uint8_t)VT_F(word);
     in.vsize = (uint8_t)VSIZE(word);
+    in.vimm5 = (uint8_t)((word >> 16) & 0x1F);
 
     const uint32_t opc = OPCODE(word);
     a_op op;
@@ -541,13 +564,14 @@ int a_decode(uint32_t word, uint32_t addr, a_insn *out) {
 
     /* VFPU arithmetic families. Sub-opcode lives in bits 25..23. */
     case 0x18:
+        /* VFPU0. SNC assembles vdiv.s as 0x63C02000: sub-opcode 7. An
+         * earlier revision put vdiv at 4, which is not an instruction, and
+         * left every real vdiv (17 sites in ULUS10505) undecoded. */
         switch ((word >> 23) & 7) {
         case 0: op = A_VADD; break;
         case 1: op = A_VSUB; break;
-        /* vdiv is sub-opcode 4, not 7. An earlier revision had it at 7, which
-         * both mis-decoded two real instructions and left actual vdiv falling
-         * through as unknown. Corrected against the published encoding. */
-        case 4: op = A_VDIV; break;
+        case 2: op = A_VSBN; break;
+        case 7: op = A_VDIV; break;
         default: op = A_VFPU_UNKNOWN; break;
         }
         break;
@@ -637,8 +661,51 @@ int a_decode(uint32_t word, uint32_t addr, a_insn *out) {
         case 0x13: op = A_VF2ID; break;
         case 0x14: op = A_VI2F;  break;
         case 0x15: op = A_VCMOV; break;
-        /* VFPU7 (rs=1) and VFPU9 (rs=2) are the conversion and shuffle
-         * tables; mapped but not broken out yet. */
+        case 0x01:                                  /* VFPU7 */
+            switch (RT_F(word)) {
+            case 0x00: op = A_VRNDS;  break;
+            case 0x01: op = A_VRNDI;  break;
+            case 0x02: op = A_VRNDF1; break;
+            case 0x03: op = A_VRNDF2; break;
+            case 0x12: op = A_VF2H;   break;
+            case 0x13: op = A_VH2F;   break;
+            case 0x16: op = A_VSBZ;   break;
+            case 0x17: op = A_VLGB;   break;
+            case 0x18: op = A_VUC2I;  break;
+            case 0x19: op = A_VC2I;   break;
+            case 0x1A: op = A_VUS2I;  break;
+            case 0x1B: op = A_VS2I;   break;
+            case 0x1C: op = A_VI2UC;  break;
+            case 0x1D: op = A_VI2C;   break;
+            case 0x1E: op = A_VI2US;  break;
+            case 0x1F: op = A_VI2S;   break;
+            default:   op = A_VFPU_UNKNOWN; break;
+            }
+            break;
+        case 0x02:                                  /* VFPU9 */
+            switch (RT_F(word)) {
+            case 0x00: op = A_VSRT1;  break;
+            case 0x01: op = A_VSRT2;  break;
+            case 0x02: op = A_VBFY1;  break;
+            case 0x03: op = A_VBFY2;  break;
+            case 0x04: op = A_VOCP;   break;
+            case 0x05: op = A_VSOCP;  break;
+            case 0x06: op = A_VFAD;   break;
+            case 0x07: op = A_VAVG;   break;
+            case 0x08: op = A_VSRT3;  break;
+            case 0x09: op = A_VSRT4;  break;
+            case 0x0A: op = A_VSGN;   break;
+            case 0x10: op = A_VMFVC;  break;
+            case 0x11: op = A_VMTVC;  break;
+            case 0x19: op = A_VT4444; break;
+            case 0x1A: op = A_VT5551; break;
+            case 0x1B: op = A_VT5650; break;
+            default:   op = A_VFPU_UNKNOWN; break;
+            }
+            break;
+        case 0x18: case 0x19: case 0x1A: case 0x1B:
+        case 0x1C: case 0x1D: case 0x1E: case 0x1F:
+            op = A_VWBN; break;
         default:   op = A_VFPU_UNKNOWN; break;
         }
         break;
@@ -653,7 +720,8 @@ int a_decode(uint32_t word, uint32_t addr, a_insn *out) {
         case 0x08: op = A_VTFM3; break;
         case 0x0C: op = A_VTFM4; break;
         case 0x10: op = A_VMSCL; break;
-        case 0x14: op = A_VCRSP; break;
+        /* vcrsp.t and vqmul.q share rs; the width tells them apart. */
+        case 0x14: op = (in.vsize == 4) ? A_VQMUL : A_VCRSP; break;
         case 0x1C:
             if (RS_F(word) == 0x1D) { op = A_VROT; break; }
             switch ((word >> 16) & 0xF) {   /* VFPUMatrix1 */
@@ -669,8 +737,16 @@ int a_decode(uint32_t word, uint32_t addr, a_insn *out) {
         break;
 
     case 0x1C: case 0x1D: case 0x1E:
-    case 0x35: case 0x3D: case 0x3F:
+    case 0x35: case 0x3D:
         op = A_VFPU_UNKNOWN;
+        break;
+
+    case 0x3F:
+        /* VFPU7 control words: exact encodings, nothing else is defined. */
+        if (word == 0xFFFF0000u)      op = A_VNOP;
+        else if (word == 0xFFFF0320u) op = A_VSYNC;
+        else if (word == 0xFFFF040Du) op = A_VFLUSH;
+        else                          op = A_VFPU_UNKNOWN;
         break;
 
     default:
