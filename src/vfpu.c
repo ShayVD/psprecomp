@@ -523,12 +523,15 @@ static void transform(const char *what, uint32_t vd, uint32_t vs, uint32_t vt, i
     if (!psp_vfpu__no_prefix(what)) return;
     float m[4][4];
     int d[4], t[4];
+    /* vt is read at its own width (the instruction's width field), which for
+     * the homogeneous form is one lane narrower than the order. */
+    const int nt = homog ? order - 1 : order;
     matrix_read(vs, order, m);
-    psp_vfpu_regs(vt, order, t);
+    psp_vfpu_regs(vt, nt, t);
     psp_vfpu_regs(vd, order, d);
 
     float in[4], out[4];
-    for (int i = 0; i < order; i++) in[i] = psp_cpu.v[t[i]];
+    for (int i = 0; i < nt; i++) in[i] = psp_cpu.v[t[i]];
     if (homog) in[order - 1] = 1.0f;
     for (int r = 0; r < order; r++) {
         float sum = 0.0f;
@@ -545,12 +548,12 @@ void psp_vtfm(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
 }
 
 /* vhtfm2/3/4. `order` is the matrix order; the instruction's width field is
- * the vector's, order - 1 lanes. UNVERIFIED on hardware, beyond the
- * orientation: the destination is written `order` lanes wide (the last is
- * the transformed 1, i.e. M's last row dotted with [v, 1]), and vd and vt are
- * addressed as `order`-wide registers. For a register whose bits 6..5 are
- * clear -- every one of the game's four sites -- order-wide and
- * (order - 1)-wide addressing name the same leading lanes. */
+ * the vector's, order - 1 lanes, and vt is read at that width. UNVERIFIED on
+ * hardware, beyond the orientation: the destination is written `order` lanes
+ * wide (the last is the transformed 1, i.e. M's last row dotted with [v, 1])
+ * and vd is addressed as an `order`-wide register. For a vd whose bits 6..5
+ * are clear -- every one of the game's four sites -- that names the same
+ * leading lanes as (order - 1)-wide addressing would. */
 void psp_vhtfm(uint32_t vd, uint32_t vs, uint32_t vt, int order) {
     if (order < 2 || order > 4) { psp_vfpu__end(); psp_vfpu__trap("vhtfm order"); return; }
     transform("vhtfm", vd, vs, vt, order, 1);

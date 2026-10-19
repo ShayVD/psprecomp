@@ -54,7 +54,7 @@
  *   vrnds (no vector destination)               trap    trap    trap
  *   vmidt vmzero vmone vmmov vmscl              trap    trap    trap
  *   vtfm vhtfm vmmul
- *   lv/sv, mfv/mtv                              neither read nor consumed
+ *   lv/sv, mfv/mtv, vnop vsync vflush           neither read nor consumed
  *
  * (1) An integer result (vf2i*, the packing ops, vrndi) is masked but never
  * saturated; a float result (vi2f, vrndf1/2) takes both.

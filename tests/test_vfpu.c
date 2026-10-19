@@ -411,6 +411,21 @@ static void test_homogeneous_transform(void) {
     for (int r = 0; r < 3; r++)
         CHECK(psp_cpu.v[d[r]] == psp_cpu.v[e[r]], "zero translation: vhtfm4 lane %d == vtfm3", r);
 
+    /* vt is addressed at its own width, order - 1: a .t vector at row 1
+     * (0x58: matrix 6, column 0, bit 6 set) is rows 1, 2, 3 -- at width 4 the
+     * same field would start at row 2. Translation by (5, -6, 7) of
+     * (1, 2, 3) is (6, -4, 10, 1). */
+    for (int c = 0; c < 4; c++)
+        for (int r = 0; r < 4; r++) m[c][r] = (c == r) ? 1.0f : 0.0f;
+    m[3][0] = 5.0f; m[3][1] = -6.0f; m[3][2] = 7.0f;
+    set_matrix(0x08, 4, m);
+    psp_cpu.v[24] = 100.0f; psp_cpu.v[25] = 1.0f; psp_cpu.v[26] = 2.0f; psp_cpu.v[27] = 3.0f;
+    psp_vhtfm(0x1C, 0x08, 0x58, 4);
+    psp_vfpu_regs(0x1C, 4, d);
+    CHECK(psp_cpu.v[d[0]] == 6.0f && psp_cpu.v[d[1]] == -4.0f && psp_cpu.v[d[2]] == 10.0f &&
+          psp_cpu.v[d[3]] == 1.0f, "vhtfm4 with a .t vt at row 1: %g %g %g %g",
+          (double)psp_cpu.v[d[0]], (double)psp_cpu.v[d[1]], (double)psp_cpu.v[d[2]], (double)psp_cpu.v[d[3]]);
+
     /* A pending prefix traps, as for vtfm, and nothing is written. */
     const uint64_t before = psp_vfpu_trap_count();
     psp_cpu.v[d[0]] = 42.0f;
