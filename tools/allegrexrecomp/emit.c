@@ -630,8 +630,9 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
     case A_SYSCALL:
         fprintf(f, "%spsp_syscall(0x%05Xu);\n", ind, (in->raw >> 6) & 0xFFFFF); return;
     case A_BREAK:
-        /* The game's own trap (asserts). Not a translation gap: the host
-         * decides what a guest break means. */
+        /* A trap the guest program itself executes (the compiler's divide-by-zero
+         * check, code 7, or an assert). Not a translation gap: the host decides
+         * what a guest break means. */
         fprintf(f, "%spsp_break(0x%08Xu, 0x%05Xu);\n", ind, in->addr, (in->raw >> 6) & 0xFFFFF); return;
 
     default:
