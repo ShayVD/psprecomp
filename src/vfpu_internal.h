@@ -1,7 +1,14 @@
-/* Internal to the VFPU implementation (vfpu.c, and the op files later tasks
- * add): operand access with prefixes applied. Every op that computes reads
- * its sources through vfpu_read, writes through vfpu_write (or
- * vfpu_write_bits), and ends with vfpu_end. */
+/* Internal to the VFPU implementation: vfpu.c (register addressing, prefix
+ * state, operand access, the element-wise, unary and matrix ops) and
+ * vfpu_ops.c (mfv/mtv, vrot, vcmov, vcrsp/vqmul, vsge/vslt, the conversions
+ * and packing, the VFPU9 lane ops and vrnd*). Every op that computes reads
+ * its sources through psp_vfpu__read, writes through psp_vfpu__write (or
+ * psp_vfpu__write_bits), and ends with psp_vfpu__end.
+ *
+ * These are linked externally (two files share them), so they carry the
+ * library's psp_ prefix and a double underscore marking them internal:
+ * nothing outside the VFPU may call them, and they cannot collide with a
+ * host's own names. */
 #ifndef PSPRECOMP_VFPU_INTERNAL_H
 #define PSPRECOMP_VFPU_INTERNAL_H
 
@@ -9,28 +16,28 @@
 
 /* Lanes an element-wise op covers for a width field: 1, 2, 3, or 4. */
 static inline int vfpu_width(int size) { return size >= 1 && size <= 3 ? size : 4; }
-/* 1 if the S (PSP_VPFX_S) or T (PSP_VPFX_T) prefix is pending. */
-int vfpu_prefix_is_set(int which);
+/* 1 if the S, T or D prefix (PSP_VPFX_S/_T/_D) is pending. */
+int psp_vfpu__prefix_is_set(int which);
 
 /* `n` lanes of `vreg` as operand `which` (PSP_VPFX_S or PSP_VPFX_T), with
  * that operand's pending prefix applied. */
-void vfpu_read(int which, uint32_t vreg, int n, float out[4]);
+void psp_vfpu__read(int which, uint32_t vreg, int n, float out[4]);
 /* `n` lanes with no prefix, e.g. a destination's old value. */
-void vfpu_read_raw(uint32_t vreg, int n, float out[4]);
+void psp_vfpu__read_raw(uint32_t vreg, int n, float out[4]);
 /* Write `n` lanes through the pending destination prefix. */
-void vfpu_write(uint32_t vreg, int n, const float in[4]);
+void psp_vfpu__write(uint32_t vreg, int n, const float in[4]);
 /* The same for integer results: the write mask applies, saturation does not. */
-void vfpu_write_bits(uint32_t vreg, int n, const uint32_t in[4]);
+void psp_vfpu__write_bits(uint32_t vreg, int n, const uint32_t in[4]);
 /* Consume the prefixes. */
-void vfpu_end(void);
+void psp_vfpu__end(void);
 /* For ops without prefix support: 1 to go ahead, or 0 after trapping (and
  * consuming the prefixes) if one is pending. */
-int vfpu_no_prefix(const char *what);
+int psp_vfpu__no_prefix(const char *what);
 /* Sine and cosine of an angle in quarter turns; exact at whole quarter turns. */
-void vfpu_sincos_q(float a, float *s, float *c);
+void psp_vfpu__sincos_q(float a, float *s, float *c);
 /* Restart the vrnd* generator from its fixed seed (psp_vfpu_reset calls it). */
-void vfpu_rnd_reset(void);
+void psp_vfpu__rnd_reset(void);
 /* Report through the trap handler. */
-void vfpu_trap(const char *what);
+void psp_vfpu__trap(const char *what);
 
 #endif

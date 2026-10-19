@@ -1,7 +1,7 @@
 /* VFPU operand prefixes and vcmp conditions. Synthetic values only. */
 #include "psprecomp/vfpu.h"
 #include "psprecomp/recomp_rt.h"
-#include "../src/vfpu_internal.h"      /* vfpu_read, for the identity sweep */
+#include "../src/vfpu_internal.h"      /* psp_vfpu__read, for the identity sweep */
 
 #include <math.h>
 #include <stdio.h>
@@ -302,10 +302,10 @@ int main(void) {
         for (int n = 1; n <= 4; n++)
             for (uint32_t v = 0; v < 128; v++) {
                 float a[4], b[4];
-                vfpu_read_raw(v, n, a);
+                psp_vfpu__read_raw(v, n, a);
                 psp_vfpu_set_prefix(PSP_VPFX_S, 0xE4);
-                vfpu_read(PSP_VPFX_S, v, n, b);
-                vfpu_end();
+                psp_vfpu__read(PSP_VPFX_S, v, n, b);
+                psp_vfpu__end();
                 if (memcmp(a, b, sizeof(float) * (size_t)n)) bad++;
             }
         CHECK(bad == 0, "identity prefix differs from a raw read in %d operands", bad);
@@ -320,16 +320,16 @@ int main(void) {
         for (int i = 0; i < 128; i++) psp_cpu.v[i] = (float)i;
         float b[4];
         psp_vfpu_set_prefix(PSP_VPFX_S, 0x0Eu);     /* lane0 <- 2, lane1 <- 3 */
-        vfpu_read(PSP_VPFX_S, 0x60u, 2, b);
-        vfpu_end();
+        psp_vfpu__read(PSP_VPFX_S, 0x60u, 2, b);
+        psp_vfpu__end();
         CHECK(b[0] == 0.0f && b[1] == 32.0f, "transposed pair wrap: %g %g", b[0], b[1]);
         psp_vfpu_set_prefix(PSP_VPFX_S, 0x01u);     /* lane0 <- 1 */
-        vfpu_read(PSP_VPFX_S, 0x60u, 1, b);
-        vfpu_end();
+        psp_vfpu__read(PSP_VPFX_S, 0x60u, 1, b);
+        psp_vfpu__end();
         CHECK(b[0] == 0.0f, "single row-3 wrap: %g", b[0]);
         psp_vfpu_set_prefix(PSP_VPFX_S, 0x00u);     /* lane0 <- 0 */
-        vfpu_read(PSP_VPFX_S, 0x60u, 1, b);
-        vfpu_end();
+        psp_vfpu__read(PSP_VPFX_S, 0x60u, 1, b);
+        psp_vfpu__end();
         CHECK(b[0] == 3.0f, "single row-3 pick 0: %g", b[0]);
     }
 

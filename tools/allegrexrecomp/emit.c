@@ -133,7 +133,7 @@ _Static_assert(A_VF2IZ == A_VF2IN + 1 && A_VF2IU == A_VF2IN + 2 && A_VF2ID == A_
                "psp_vf2i's rounding mode is the op's offset from A_VF2IN");
 
 /* Nothing else maintains psp_cpu.pc, so a VFPU call stores its own address
- * first: a trap inside it (see vfpu_trap) then names this instruction. The
+ * first: a trap inside it (see psp_vfpu__trap) then names this instruction. The
  * store sits next to each computing psp_v* call in emit_simple, and the table
  * test in tests/test_emit_vfpu.c guards that no case loses it. No store for
  * what cannot trap: the lv/sv loads and stores, the prefix setters, mfv/mtv
