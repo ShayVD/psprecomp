@@ -271,7 +271,8 @@ void psp_vidt(uint32_t vd, int size) {
 
 /* vcst -- load a constant from the VFPU's built-in table.
  *
- * The index is in the vs field. Values follow the hardware table; index 0 is
+ * The index is in bits 20..16 of the word (a_insn.vimm5), not in vs; SNC
+ * assembles vcst.s S000, VFPU_PI as 0xD0690000. Values follow the hardware table; index 0 is
  * zero and anything past the end reads as zero rather than as garbage. */
 void psp_vcst(uint32_t vd, uint32_t which, int size) {
     if (!take_prefixes(psp_cpu.pc, "vcst")) return;

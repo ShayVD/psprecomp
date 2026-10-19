@@ -12,8 +12,9 @@
  *   - MAX/MIN at SPECIAL 0x2C/0x2D
  *   - MADD/MADDU/MSUB/MSUBU at SPECIAL 0x1C/0x1D/0x2E/0x2F
  *   - BITREV and WSBW in the SPECIAL3 BSHFL group
- *   - the VFPU occupying COP2 and opcodes 0x18/0x19/0x1B/0x1C, plus its own
- *     load/store opcodes (lv.s 0x32, lv.q 0x36, sv.s 0x3A, sv.q 0x3E)
+ *   - the VFPU occupying COP2 and opcodes 0x18/0x19/0x1B, 0x34, 0x37, 0x3C and
+ *     0x3F, plus its own load/store opcodes (lv.s 0x32, lv.q 0x36, sv.s 0x3A,
+ *     sv.q 0x3E). 0x35/0x3D (lvl.q/lvr.q/svl.q/svr.q) are not decoded yet.
  */
 #ifndef ALLEGREX_DECODE_H
 #define ALLEGREX_DECODE_H
@@ -82,7 +83,7 @@ typedef enum {
     A_VADD, A_VSUB, A_VDIV, A_VMUL, A_VDOT, A_VSCL, A_VHDP, A_VCRS, A_VDET,
     A_VCMP, A_VMIN, A_VMAX, A_VSCMP, A_VSGE, A_VSLT,
     A_VMOV, A_VABS, A_VNEG, A_VZERO, A_VONE, A_VRCP, A_VRSQ, A_VSQRT,
-    A_VSIN, A_VCOS, A_VEXP2, A_VLOG2, A_VI2F, A_VF2I,
+    A_VSIN, A_VCOS, A_VEXP2, A_VLOG2, A_VI2F,
     /* Prefix instructions. These compute nothing: they set a register that
      * rewrites the operands of the *next* instruction. Decoding them is not
      * optional — if they are missed, the following arithmetic silently
@@ -122,7 +123,8 @@ typedef enum {
     F_RS_RT_OFF, F_RS_OFF, F_TARGET, F_RS, F_RD_RS, F_RD_RT, F_RD, F_RS_RT,
     F_RT_IMM, F_RT_OFF_BASE, F_FT_OFF_BASE, F_RT_FS, F_FD_FS_FT, F_FD_FS,
     F_FS_FT, F_OFF, F_CODE, F_RT_RS_POS_SZ, F_RD_RS_RT_SA,
-    F_VD_VS_VT, F_VD_VS, F_VT_OFF_BASE, F_RT_VD, F_UNKNOWN
+    F_VD_VS_VT, F_VD_VS, F_VT_OFF_BASE, F_RT_VD, F_VD_VS_IMM, F_VD_IMM,
+    F_RT_CTRL, F_UNKNOWN
 } a_fmt;
 
 typedef struct {
@@ -141,9 +143,15 @@ typedef struct {
     uint8_t  vs, vt, vd; /* VFPU register fields (7-bit) */
     uint8_t  vsize;      /* 1=single 2=pair 3=triple 4=quad */
     /* VFPU bits 20..16, decoded for every word: the vrot lane code, vcmov's
-     * true/false bit and condition, the conversion scale exponent, and the
-     * bv* branches' condition index (bits 20..18). */
+     * true/false bit and condition, the conversion scale exponent (vf2i*,
+     * vi2f), vcst's constant index, and the bv* branches' condition index
+     * (bits 20..18). vwbn's immediate is 8 bits wide (23..16): vimm8.
+     *
+     * Control registers: mfvc/mtvc carry reg - 128 in vd. vmfvc has the
+     * control register number in vs, vmtvc in vd. vsize is meaningless for
+     * all four. */
     uint8_t  vimm5;
+    uint8_t  vimm8;
 
     /* Analysis flags — what the discovery pass and the emitter need to know
      * without re-deriving it from the opcode. */

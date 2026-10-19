@@ -94,3 +94,7 @@ add_test(NAME prune COMMAND test_prune)
 add_executable(test_decode_vfpu test_decode_vfpu.c)
 target_link_libraries(test_decode_vfpu PRIVATE allegrex_core)
 add_test(NAME decode_vfpu COMMAND test_decode_vfpu)
+
+add_executable(test_emit_vfpu test_emit_vfpu.c)
+target_link_libraries(test_emit_vfpu PRIVATE allegrex_core)
+add_test(NAME emit_vfpu COMMAND test_emit_vfpu)

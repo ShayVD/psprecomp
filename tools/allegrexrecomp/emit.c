@@ -440,7 +440,7 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
         fprintf(f, "%spsp_vidt(%u, %u);\n", ind, in->vd, in->vsize);
         return;
     case A_VCST:
-        fprintf(f, "%spsp_vcst(%u, %u, %u);\n", ind, in->vd, in->vs, in->vsize);
+        fprintf(f, "%spsp_vcst(%u, %u, %u);\n", ind, in->vd, in->vimm5, in->vsize);
         return;
 
     /* Immediate loads: the value is in the instruction, not a register. */

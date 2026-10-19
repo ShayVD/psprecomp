@@ -43,7 +43,7 @@ typedef struct {
     uint32_t insns;         /* instructions actually visited */
     unsigned has_return  : 1;   /* reaches a `jr $ra` */
     unsigned has_indirect: 1;   /* contains an unresolved computed jump */
-    unsigned has_vfpu    : 1;   /* touches the VFPU */
+    unsigned has_vfpu    : 1;   /* contains a VFPU word the decoder does not name (A_VFPU_UNKNOWN) */
 } a_func;
 
 /* A switch table recovered at a `jr $rN` site.

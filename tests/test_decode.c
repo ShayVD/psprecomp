@@ -254,7 +254,7 @@ static void test_formatting(void) {
 
     /* An unrecognised word must format as data, never as a plausible-looking
      * instruction — that is what makes a bad disassembly obvious on sight. */
-    a_decode(0xFFFFFFFF, 0x08900000, &in);
+    a_decode(0xD4000000, 0x08900000, &in);   /* opcode 0x35: not decoded */
     a_format(&in, buf, sizeof buf);
     CHECK(strstr(buf, ".word"), "unknown word formatting: \"%s\"", buf);
 }

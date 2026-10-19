@@ -170,8 +170,8 @@ static const a_opinfo OPINFO[A_OP_COUNT] = {
 
     [A_MFV]      = { "mfv",      F_RT_VD },
     [A_MTV]      = { "mtv",      F_RT_VD },
-    [A_MFVC]     = { "mfvc",     F_RT_VD },
-    [A_MTVC]     = { "mtvc",     F_RT_VD },
+    [A_MFVC]     = { "mfvc",     F_RT_CTRL },
+    [A_MTVC]     = { "mtvc",     F_RT_CTRL },
     [A_BVF]      = { "bvf",      F_OFF },
     [A_BVT]      = { "bvt",      F_OFF },
     [A_BVFL]     = { "bvfl",     F_OFF },
@@ -211,8 +211,7 @@ static const a_opinfo OPINFO[A_OP_COUNT] = {
     [A_VCOS]     = { "vcos",     F_VD_VS },
     [A_VEXP2]    = { "vexp2",    F_VD_VS },
     [A_VLOG2]    = { "vlog2",    F_VD_VS },
-    [A_VI2F]     = { "vi2f",     F_VD_VS },
-    [A_VF2I]     = { "vf2i",     F_VD_VS },
+    [A_VI2F]     = { "vi2f",     F_VD_VS_IMM },
     [A_VIDT]     = { "vidt",     F_VD_VS },
     [A_VSAT0]    = { "vsat0",    F_VD_VS },
     [A_VSAT1]    = { "vsat1",    F_VD_VS },
@@ -220,12 +219,12 @@ static const a_opinfo OPINFO[A_OP_COUNT] = {
     [A_VNRCP]    = { "vnrcp",    F_VD_VS },
     [A_VNSIN]    = { "vnsin",    F_VD_VS },
     [A_VREXP2]   = { "vrexp2",   F_VD_VS },
-    [A_VCST]     = { "vcst",     F_VD_VS },
-    [A_VF2IN]    = { "vf2in",    F_VD_VS },
-    [A_VF2IZ]    = { "vf2iz",    F_VD_VS },
-    [A_VF2IU]    = { "vf2iu",    F_VD_VS },
-    [A_VF2ID]    = { "vf2id",    F_VD_VS },
-    [A_VCMOV]    = { "vcmov",    F_VD_VS },
+    [A_VCST]     = { "vcst",     F_VD_IMM },
+    [A_VF2IN]    = { "vf2in",    F_VD_VS_IMM },
+    [A_VF2IZ]    = { "vf2iz",    F_VD_VS_IMM },
+    [A_VF2IU]    = { "vf2iu",    F_VD_VS_IMM },
+    [A_VF2ID]    = { "vf2id",    F_VD_VS_IMM },
+    [A_VCMOV]    = { "vcmov",    F_VD_VS_IMM },
     [A_VWBN]     = { "vwbn",     F_VD_VS },
     [A_VMMUL]    = { "vmmul",    F_VD_VS_VT },
     [A_VTFM2]    = { "vtfm2",    F_VD_VS_VT },
@@ -253,7 +252,7 @@ static const a_opinfo OPINFO[A_OP_COUNT] = {
     [A_VT5551] = { "vt5551", F_VD_VS },    [A_VT5650] = { "vt5650", F_VD_VS },
     [A_VNOP]   = { "vnop",   F_NONE },     [A_VSYNC]  = { "vsync",  F_NONE },
     [A_VFLUSH] = { "vflush", F_NONE },
-    [A_VROT]     = { "vrot",     F_VD_VS },
+    [A_VROT]     = { "vrot",     F_VD_VS_IMM },
     [A_VMMOV]    = { "vmmov",    F_VD_VS },
     [A_VMIDT]    = { "vmidt",    F_VD_VS },
     [A_VMZERO]   = { "vmzero",   F_VD_VS },
@@ -502,6 +501,7 @@ int a_decode(uint32_t word, uint32_t addr, a_insn *out) {
     in.vt = (uint8_t)VT_F(word);
     in.vsize = (uint8_t)VSIZE(word);
     in.vimm5 = (uint8_t)((word >> 16) & 0x1F);
+    in.vimm8 = (uint8_t)((word >> 16) & 0xFF);
 
     const uint32_t opc = OPCODE(word);
     a_op op;
@@ -616,14 +616,10 @@ int a_decode(uint32_t word, uint32_t addr, a_insn *out) {
         }
         break;
 
-    /* The rest of the VFPU encoding space. We recognise it *as* VFPU so the
-     * emitter refuses loudly rather than emitting silently-wrong code, and so
-     * coverage reports tell us how much of a game actually needs it. */
-    /* The rest of the VFPU encoding space. 0x34 (VFPU4: vmov/vabs/vrcp/vsin/
-     * vcos/vf2i/vi2f/vcmov and friends) and 0x3C (VFPU6: vmmul, vtfm2/3/4,
-     * vmscl, vrot) are mapped but not yet implemented — see docs/VFPU.md.
-     * Recognised as VFPU so they refuse loudly instead of decoding as
-     * something else. */
+    /* The rest of the VFPU encoding space. Words we recognise *as* VFPU but
+     * do not name stay A_VFPU_UNKNOWN, so the emitter refuses them loudly
+     * rather than emitting silently-wrong code, and coverage reports say how
+     * much of a game needs them. */
     /* VFPU4 group. Two levels: rs (25..21) picks the sub-table, rt (20..16)
      * picks the operation within it. Confirmed against a real module -- every
      * rs value observed there falls inside this map with nothing left over,
@@ -721,7 +717,10 @@ int a_decode(uint32_t word, uint32_t addr, a_insn *out) {
         case 0x0C: op = A_VTFM4; break;
         case 0x10: op = A_VMSCL; break;
         /* vcrsp.t and vqmul.q share rs; the width tells them apart. */
-        case 0x14: op = (in.vsize == 4) ? A_VQMUL : A_VCRSP; break;
+        case 0x14:
+            op = (in.vsize == 4) ? A_VQMUL
+               : (in.vsize == 3) ? A_VCRSP : A_VFPU_UNKNOWN;
+            break;
         case 0x1C:
             if (RS_F(word) == 0x1D) { op = A_VROT; break; }
             switch ((word >> 16) & 0xF) {   /* VFPUMatrix1 */
@@ -742,11 +741,13 @@ int a_decode(uint32_t word, uint32_t addr, a_insn *out) {
         break;
 
     case 0x3F:
-        /* VFPU7 control words: exact encodings, nothing else is defined. */
-        if (word == 0xFFFF0000u)      op = A_VNOP;
-        else if (word == 0xFFFF0320u) op = A_VSYNC;
-        else if (word == 0xFFFF040Du) op = A_VFLUSH;
-        else                          op = A_VFPU_UNKNOWN;
+        /* Pipeline control: the top half is all ones. vnop is 0xFFFF0000 and
+         * vflush 0xFFFF040D; vsync takes a 16-bit immediate (SNC emits
+         * 0xFFFF0320), so any other low half is a vsync. */
+        if ((word & 0xFFFF0000u) != 0xFFFF0000u) op = A_VFPU_UNKNOWN;
+        else if ((word & 0xFFFFu) == 0x0000u)    op = A_VNOP;
+        else if ((word & 0xFFFFu) == 0x040Du)    op = A_VFLUSH;
+        else                                     op = A_VSYNC;
         break;
 
     default:
@@ -871,6 +872,15 @@ int a_format(const a_insn *in, char *buf, int buflen) {
     case F_RT_VD:
         return snprintf(buf, buflen, "%-10s %s, v%u", name,
                         a_reg_name(in->rt), in->vd);
+    case F_VD_VS_IMM:
+        return snprintf(buf, buflen, "%-10s v%u, v%u, %u   ; %u lanes", name,
+                        in->vd, in->vs, in->vimm5, in->vsize);
+    case F_VD_IMM:
+        return snprintf(buf, buflen, "%-10s v%u, %u   ; %u lanes", name,
+                        in->vd, in->vimm5, in->vsize);
+    case F_RT_CTRL:
+        return snprintf(buf, buflen, "%-10s %s, $%u", name,
+                        a_reg_name(in->rt), 128u + in->vd);
     case F_UNKNOWN:
     default:
         return snprintf(buf, buflen, ".word     0x%08X", in->raw);

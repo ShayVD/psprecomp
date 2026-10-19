@@ -343,6 +343,31 @@ static void test_matrix_transform(void) {
                 "vmmul and vtfm agree: (A*B)x == A(Bx)");
 }
 
+/* vcst: index -> value, against the published VFPU constant list. */
+static void test_vcst_table(void) {
+    static const double want[20] = {
+        0.0, 3.4028234663852886e38, 1.4142135623730951, 0.7071067811865476,
+        1.1283791670955126, 0.6366197723675814, 0.3183098861837907,
+        0.7853981633974483, 1.5707963267948966, 3.141592653589793,
+        2.718281828459045, 1.4426950408889634, 0.4342944819032518,
+        0.6931471805599453, 2.302585092994046, 6.283185307179586,
+        0.5235987755982988, 0.3010299956639812, 3.321928094887362,
+        0.8660254037844386,
+    };
+    for (int i = 0; i < 20; i++) {
+        psp_cpu.v[0] = -1.0f;
+        psp_vcst(0, (uint32_t)i, 1);
+        double got = (double)psp_cpu.v[0];
+        double tol = want[i] * 1e-6;
+        CHECK(got >= want[i] - tol && got <= want[i] + tol,
+              "vcst %d: got %.9g, want %.9g", i, got, want[i]);
+    }
+    /* Past the end of the table reads as zero. */
+    psp_cpu.v[0] = -1.0f;
+    psp_vcst(0, 20, 1);
+    CHECK(psp_cpu.v[0] == 0.0f, "vcst 20 reads zero");
+}
+
 int main(void) {
     if (psp_mem_init() != 0) { printf("memory init failed\n"); return 1; }
     psp_cpu_reset();
@@ -355,6 +380,7 @@ int main(void) {
     test_compare();
     test_matrix_ops();
     test_matrix_transform();
+    test_vcst_table();
 
     psp_mem_free();
 

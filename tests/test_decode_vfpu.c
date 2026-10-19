@@ -95,6 +95,72 @@ int main(void) {
     FIELD(0xD2908180u, in.vimm5 == 16, "vi2f scale 16");
     FIELD(0xF2828100u, in.vsize == 3, "vcrsp is a triple");
 
+    /* vcst's constant index is bits 20..16, not vs. pspas: vcst.s S000,
+     * VFPU_PI is 0xD0690000; VFPU_2_PI into S010 is 0xD0650001; the game's
+     * 2/pi at 0x08858B60 is 0xD0650024. */
+    dec(0xD0690000u, A_VCST, "vcst");
+    FIELD(0xD0690000u, in.vimm5 == 9 && in.vd == 0 && in.vs == 0, "vcst PI index in vimm5");
+    FIELD(0xD0650001u, in.vimm5 == 5 && in.vd == 1 && in.vsize == 1, "vcst 2_PI into S010");
+    FIELD(0xD0650024u, in.vimm5 == 5 && in.vd == 0x24, "vcst from the game");
+
+    /* vwbn's immediate is 8 bits, 23..16 (pspas: vwbn.s S000, S000, 171). */
+    dec(0xD3AB0000u, A_VWBN, "vwbn");
+    FIELD(0xD3AB0000u, in.vimm8 == 0xAB, "vwbn imm8");
+
+    /* Control registers: mfvc/mtvc vd = reg - 128; vmfvc has the control
+     * register in vs, vmtvc in vd. vsize means nothing for these. */
+    FIELD(0x48640083u, in.vd == 3 && in.rt == 4, "mfvc $a0, $131");
+    FIELD(0x48E40083u, in.vd == 3 && in.rt == 4, "mtvc $a0, $131");
+    FIELD(0xD0508301u, in.vs == 3 && in.vd == 1, "vmfvc S010, $131");
+    FIELD(0xD0510183u, in.vd == 3 && in.vs == 1, "vmtvc $131, S010");
+
+    /* vcrsp is a triple op and vqmul a quad op; nothing else is defined. */
+    dec(0xF2820000u, A_VFPU_UNKNOWN, "vfpu?");   /* .s */
+    dec(0xF2820080u, A_VFPU_UNKNOWN, "vfpu?");   /* .p */
+
+    /* vsync carries a 16-bit immediate; 0x0000 is vnop, 0x040D vflush. */
+    dec(0xFFFF0001u, A_VSYNC, "vsync");
+    dec(0xFFFF8000u, A_VSYNC, "vsync");
+    dec(0xFFFE0000u, A_VFPU_UNKNOWN, "vfpu?");
+    dec(0xFFFF0000u, A_VNOP, "vnop");
+
+    /* Holes in the tables stay unknown. */
+    dec(0x61800000u, A_VFPU_UNKNOWN, "vfpu?");   /* VFPU0 sub-op 3 */
+    dec(0x62800000u, A_VFPU_UNKNOWN, "vfpu?");   /* VFPU0 sub-op 5 */
+    dec(0x63000000u, A_VFPU_UNKNOWN, "vfpu?");   /* VFPU0 sub-op 6 */
+    dec(0xD0240000u, A_VFPU_UNKNOWN, "vfpu?");   /* VFPU7 rt=4 */
+    dec(0xD04B0000u, A_VFPU_UNKNOWN, "vfpu?");   /* VFPU9 rt=0x0B */
+    dec(0xD0520000u, A_VFPU_UNKNOWN, "vfpu?");   /* VFPU9 rt=0x12 */
+    dec(0xD0580000u, A_VFPU_UNKNOWN, "vfpu?");   /* VFPU9 rt=0x18 */
+    dec(0xD0800000u, A_VFPU_UNKNOWN, "vfpu?");   /* 0x34 rs=4 */
+
+    /* Operand fields. */
+    FIELD(0xD0202000u, in.vs == 0x20, "vrnds.s S001 seed in vs");
+    FIELD(0xD0210040u, in.vd == 0x40, "vrndi.s S002 dest in vd");
+    FIELD(0x63C02000u, in.vd == 0 && in.vs == 0x20 && in.vt == 0x40, "vdiv.s fields");
+    dec(0x49150000u, A_BVT, "bvt");
+    FIELD(0x49150000u, (in.vimm5 >> 2) == 5, "bvt 5 condition index");
+
+    /* Disassembly shows the immediate that selects the operation. */
+    {
+        a_insn in; char buf[96];
+        a_decode(0xD0690000u, 0x08900000u, &in);
+        a_format(&in, buf, sizeof buf);
+        if (!strstr(buf, "vcst") || !strstr(buf, "9")) { printf("FAIL vcst format: \"%s\"\n", buf); failures++; }
+        a_decode(0xD2908180u, 0x08900000u, &in);
+        a_format(&in, buf, sizeof buf);
+        if (!strstr(buf, "16")) { printf("FAIL vi2f format: \"%s\"\n", buf); failures++; }
+        a_decode(0xF3B18180u, 0x08900000u, &in);
+        a_format(&in, buf, sizeof buf);
+        if (!strstr(buf, "0x11") && !strstr(buf, "17")) { printf("FAIL vrot format: \"%s\"\n", buf); failures++; }
+        a_decode(0x48640083u, 0x08900000u, &in);
+        a_format(&in, buf, sizeof buf);
+        if (!strstr(buf, "$131")) { printf("FAIL mfvc format: \"%s\"\n", buf); failures++; }
+        a_decode(0x48E40083u, 0x08900000u, &in);
+        a_format(&in, buf, sizeof buf);
+        if (!strstr(buf, "$131")) { printf("FAIL mtvc format: \"%s\"\n", buf); failures++; }
+    }
+
     printf("%s\n", failures ? "test_decode_vfpu: FAILED" : "test_decode_vfpu: ok");
     return failures ? 1 : 0;
 }
